@@ -31,7 +31,7 @@
 
   --text:       #EDE8DE;
   --text-dim:   #A39B8F;
-  --text-faint: #6E665C;
+  --text-faint: #81796F;
 
   --amber:      #E0A458;   /* the needle on a meter, not a brand colour */
   --amber-deep: #B87A2E;
@@ -178,7 +178,8 @@ h1 em {
   border: 1px solid var(--ink-line);
   border-radius: 10px;
   overflow: hidden;
-  box-shadow: 0 40px 80px -30px rgba(0,0,0,.85), 0 2px 8px rgba(0,0,0,.4);
+  /* Un bordo netto oppure un rilievo morbido, non tutti e due. */
+  box-shadow: 0 6px 14px -6px rgba(0,0,0,.7), 0 2px 6px rgba(0,0,0,.4);
 }
 @media (max-width: 900px) { .hero-shot { margin-right: 0; } }
 
@@ -188,7 +189,7 @@ figure { margin: 0; }
 figure img {
   border: 1px solid var(--ink-line);
   border-radius: 10px;
-  box-shadow: 0 30px 60px -28px rgba(0,0,0,.8);
+  box-shadow: 0 6px 14px -6px rgba(0,0,0,.7);
 }
 figcaption {
   font: 400 0.85rem/1.5 var(--mono);
@@ -276,6 +277,7 @@ tr:last-child td { border-bottom: 0; }
   height: 100%;
   width: 0;
   background: var(--ink-line);
+  /* impeccable-disable-next-line layout-transition -- il valore lo scrive il JS, e il riempimento acceso e' un gradiente orizzontale che con scaleX si stirerebbe invece di scorrere */
   transition: width 900ms cubic-bezier(.16,.84,.44,1);
 }
 .bar-fill.hot { background: linear-gradient(90deg, var(--amber-deep), var(--amber)); }
@@ -323,8 +325,11 @@ footer a:hover { color: var(--amber); }
 
 /* === entrance ----------------------------------------------------------- */
 
-.rise { opacity: 0; transform: translateY(14px); }
-.rise.in { opacity: 1; transform: none; transition: opacity 520ms ease, transform 520ms cubic-bezier(.16,.84,.44,1); }
+/* Il nascondino sta dietro alla classe `anima`, che la mette lo script:
+   senza JS, o con un motore che non scorre la pagina, il contenuto resta
+   visibile invece di sparire per sempre. */
+.anima .rise { opacity: 0; transform: translateY(14px); }
+.anima .rise.in { opacity: 1; transform: none; transition: opacity 520ms ease, transform 520ms cubic-bezier(.16,.84,.44,1); }
 @media (prefers-reduced-motion: reduce) {
   .rise { opacity: 1; transform: none; }
   .rise.in { transition: none; }
@@ -392,7 +397,6 @@ footer a:hover { color: var(--amber); }
 <!-- what comes back -->
 <section class="tight">
   <div class="wrap">
-    <p class="eyebrow rise">What comes back</p>
     <div class="split flip top">
       <div>
         <h2 class="rise">One document,<br>names already<br>in it.</h2>
@@ -445,7 +449,6 @@ window.</pre>
 <!-- the voice registry -->
 <section class="tight">
   <div class="wrap">
-    <p class="eyebrow rise">The chore that never ended</p>
     <div class="split top">
       <div>
         <h2 class="rise">A voice you<br>have named<br>stays named.</h2>
@@ -486,7 +489,6 @@ window.</pre>
 <!-- how a run goes -->
 <section>
   <div class="wrap">
-    <p class="eyebrow rise">How a run goes</p>
     <div class="split flip">
       <div class="rise">
         <h2>Nothing starts<br>on its own.</h2>
@@ -535,7 +537,6 @@ window.</pre>
 <!-- where the time goes -->
 <section class="tight" style="background:var(--ink-raised);border-block:1px solid var(--ink-line)">
   <div class="wrap">
-    <p class="eyebrow rise">How long you wait</p>
     <h2 class="rise" style="max-width:21ch">The same recording, measured rather than estimated.</h2>
     <p class="lede rise" style="margin-top:1.25rem">
       6 minutes 45 of Spanish conversation on an M4 with 16 GB, warm model cache,
@@ -574,7 +575,6 @@ window.</pre>
 <!-- telemetry -->
 <section class="paper tight">
   <div class="wrap">
-    <p class="eyebrow rise">One thing worth knowing</p>
     <div class="split top">
       <div class="rise"><h2>pyannote reports<br>home by default.</h2></div>
       <div class="rise">
@@ -600,7 +600,6 @@ window.</pre>
 <!-- install -->
 <section id="install">
   <div class="wrap">
-    <p class="eyebrow rise">Getting it running</p>
     <div class="split flip">
       <div>
         <h2 class="rise">Four steps,<br>one of them<br>a licence page.</h2>
@@ -655,7 +654,6 @@ scriba jobs list</pre>
 <!-- the machinery, for anybody who wants it -->
 <section class="tight">
   <div class="wrap">
-    <p class="eyebrow rise">Optional reading</p>
     <div class="split top">
       <div class="rise"><h2>What is<br>underneath.</h2></div>
       <div class="rise">
@@ -744,6 +742,9 @@ scriba jobs list</pre>
 // Entrance and the speed bars. Both are decoration, so both check whether the
 // visitor asked for less motion before doing anything at all.
 (function () {
+  // Da qui in poi si puo' nascondere, perche' da qui in poi c'e' chi
+  // riaccende.
+  document.documentElement.classList.add('anima');
   var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   document.querySelectorAll('.bar-fill').forEach(function (el) {
