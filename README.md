@@ -403,12 +403,15 @@ CMake 4 because a vendored dependency declares an ancient minimum. Both were mis
 from the branch's own instructions when this was written; they are in its
 documentation now, after they cost an hour here and got reported.
 
-Rebuilt at head 74b510a0 on 31 August 2026: the documented line configures and
-builds as written, and the C++ suite from that same MPS-enabled build gives 390
-passed and 1 skipped, against 370 passed and 2 skipped at 2f6a066. That head also
-resolves a generic MPS int8 to int8_float16 and expands the weights to FP16 once,
-which is what made MPS int8 the slowest path here in August. scriba still maps int8
-to float16 itself, because that has not been re-measured on this machine yet.
+Rebuilt and re-measured at head 74b510a0 on 31 August 2026. The documented line
+configures and builds as written, and the C++ suite from that same MPS-enabled
+build gives 390 passed and 1 skipped, against 370 passed and 2 skipped at 2f6a066.
+That head resolves a generic MPS int8 to int8_float16 and expands the weights to
+FP16 once, which was meant to fix int8 being the slowest path on the GPU. On this
+machine the resolution happens and the speed does not follow: three 30-second
+windows give MPS int8 39.9s against MPS float16 16.2s and CPU int8 35.1s, and
+switching the weight cache off changes that by 1.5%. So scriba keeps mapping int8
+to float16 itself, now for a measured reason rather than an old one.
 
 Live text while recording does not go through any of this. It runs on Apple's own
 model on the Neural Engine, which is neither the CPU nor the GPU, and costs about

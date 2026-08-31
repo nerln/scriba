@@ -72,13 +72,17 @@ def _asr_device(s) -> tuple[str, str]:
     50.5 s. Asking for int8 on Metal looked like asking for the fast path and got
     the slowest one in the build.
 
-    That reason may have expired. Since 74b510a0 the branch resolves a generic MPS
-    int8 to int8_float16 and expands the weights to FP16 once on first use, which
-    is what the 57.6 s was paying for; there is a CT2_MPS_CACHE_INT8_FP16 switch to
-    turn it off. The mapping below is unchanged all the same, because nobody has
-    re-measured it here and a default moved on somebody else's benchmark is a
-    default nobody measured. Re-run the three-window benchmark against that head
-    before touching it.
+    Re-measured at branch head 74b510a0, which resolves a generic MPS int8 to
+    int8_float16 and expands the weights to FP16 once on first use. The resolution
+    happens and the speed does not follow: MPS int8 39.9 s against MPS float16
+    16.2 s and CPU int8 35.1 s, repeated in a second pass at 38.0, 16.0 and 36.0.
+    Turning the weight cache off with CT2_MPS_CACHE_INT8_FP16=0 costs 1.5%, inside
+    the spread between windows, so the time is not going into the weights. The
+    mapping below stands, now on a number rather than on an old one.
+
+    On that head MPS int8 also produced different words from the other four
+    configurations on one recording, dropping the first two words of a window,
+    reproducibly. Another reason not to send anybody down that path by default.
 
     "auto" prefers Metal when the installed ctranslate2 has it. On the reference
     recording that is 80 s against 443 s, with 724 words against 725 and the same
