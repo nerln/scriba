@@ -397,10 +397,18 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_MPS=ON -DWITH_ACCELERATE=O
       -DWITH_MKL=OFF -DWITH_RUY=ON -DOPENMP_RUNTIME=NONE -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 ```
 
-`WITH_RUY` is not optional even though the branch's own instructions leave it out:
-without it the build has no int8 on the CPU at all, so falling back to the CPU stops
-working. `CMAKE_POLICY_VERSION_MINIMUM` is needed on CMake 4 because a vendored
-dependency declares an ancient minimum.
+`WITH_RUY` is not optional: without it the build has no int8 on the CPU at all, so
+falling back to the CPU stops working. `CMAKE_POLICY_VERSION_MINIMUM` is needed on
+CMake 4 because a vendored dependency declares an ancient minimum. Both were missing
+from the branch's own instructions when this was written; they are in its
+documentation now, after they cost an hour here and got reported.
+
+Rebuilt at head 74b510a0 on 31 August 2026: the documented line configures and
+builds as written, and the C++ suite from that same MPS-enabled build gives 390
+passed and 1 skipped, against 370 passed and 2 skipped at 2f6a066. That head also
+resolves a generic MPS int8 to int8_float16 and expands the weights to FP16 once,
+which is what made MPS int8 the slowest path here in August. scriba still maps int8
+to float16 itself, because that has not been re-measured on this machine yet.
 
 Live text while recording does not go through any of this. It runs on Apple's own
 model on the Neural Engine, which is neither the CPU nor the GPU, and costs about

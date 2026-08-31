@@ -66,10 +66,19 @@ def _asr_device(s) -> tuple[str, str]:
     """The device to decode on, and the numeric type to decode in.
 
     They are decided together because the sensible type differs per device: int8 is
-    what makes the CPU bearable and is the slowest thing the GPU can be asked to do.
-    Measured on an M4 with the branch build, batch of one: MPS int8 57.6 s against
-    MPS float16 24.9 s and CPU int8 50.5 s. Asking for int8 on Metal would look like
-    asking for the fast path and get the slowest one in the build.
+    what makes the CPU bearable and was, when this was written, the slowest thing
+    the GPU could be asked to do. Measured on an M4 with the branch build at
+    2f6a066, batch of one: MPS int8 57.6 s against MPS float16 24.9 s and CPU int8
+    50.5 s. Asking for int8 on Metal looked like asking for the fast path and got
+    the slowest one in the build.
+
+    That reason may have expired. Since 74b510a0 the branch resolves a generic MPS
+    int8 to int8_float16 and expands the weights to FP16 once on first use, which
+    is what the 57.6 s was paying for; there is a CT2_MPS_CACHE_INT8_FP16 switch to
+    turn it off. The mapping below is unchanged all the same, because nobody has
+    re-measured it here and a default moved on somebody else's benchmark is a
+    default nobody measured. Re-run the three-window benchmark against that head
+    before touching it.
 
     "auto" prefers Metal when the installed ctranslate2 has it. On the reference
     recording that is 80 s against 443 s, with 724 words against 725 and the same
