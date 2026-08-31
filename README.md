@@ -382,13 +382,17 @@ it in place, the same 6:45 recording:
 
 | | Transcription | Words |
 |---|---|---|
-| CPU, int8 | 443.1s | 725 |
-| Metal, float16 | 80.4s | 724 |
+| CPU, int8 | 227s | 706 |
+| Metal, float16 | 91s | 700 |
 
-Same text, five and a half times faster, and the difference is only where the
-matrices are multiplied. `asr_device` decides: `auto` uses Metal when the installed
-ctranslate2 has it and the CPU otherwise, so a stock install behaves exactly as it
-did. `mps` insists and fails with an explanation rather than quietly running slowly.
+Two and a half times faster for the same words, and the difference is only where
+the matrices are multiplied. Both rows were taken in one sitting on 31 August 2026
+through scriba's own pipeline, so they are comparable to each other; the pair that
+stood here before was measured months apart on a build that has changed since, and
+comparing across those is how you get a number nobody can reproduce.
+
+`asr_device` decides: `auto` uses Metal when the installed ctranslate2 has it and
+the CPU otherwise, so a stock install behaves exactly as it did. `mps` insists and fails with an explanation rather than quietly running slowly.
 
 Build it with:
 
