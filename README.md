@@ -338,23 +338,19 @@ The blunt one is Full Disk Access for whatever runs scriba. In practice that is 
 Python interpreter, and Full Disk Access on a Python interpreter is Full Disk
 Access for every package ever installed beside it. Not recommended.
 
-The other is a mirror: a separate application whose only job is to copy new
-recordings out of the library into `~/.scriba/inbox`. It is sixty lines, it moves
-audio one way, and it is the only thing that ever holds the permission. scriba
-then reads an ordinary folder and needs nothing at all.
+The other is [paranco](https://github.com/nerln/paranco): a separate application
+whose only job is to hold that one permission and lift new files out of protected
+folders into ordinary ones, along routes you define. It ships with a "Voice Memos
+to scriba" route that delivers into `~/.scriba/inbox`. scriba then reads an
+ordinary folder and needs nothing at all.
 
-```bash
-cd macapp && ./make-mirror.sh          # builds ScribaMemoMirror.app, prints the steps
-# add that .app to Full Disk Access, then:
-cd macapp && ./make-mirror.sh --install   # a launch agent, every five minutes
-```
-
-It has to be an application started by launchd, and that is not ceremony. macOS
-charges an access to the process that asked for it, so a permission cannot be
-borrowed: driving Finder or System Events from a terminal gets the terminal's
-permission tested, not theirs. Worth knowing because the refusal does not look
-like one. Asked through System Events, the library reports itself as empty rather
-than protected, which is the most misleading answer available.
+It has to be an application started by launchd or by a person, and that is not
+ceremony. macOS charges an access to the process that asked for it, so a
+permission cannot be borrowed: driving Finder or System Events from a terminal
+gets the terminal's permission tested, not theirs. Worth knowing because the
+refusal does not look like one. Asked through System Events, the library reports
+itself as empty rather than protected, which is the most misleading answer
+available. paranco was written around that finding.
 
 `scriba memos` uses the library directly when it can, and the inbox when it
 cannot, and says which.

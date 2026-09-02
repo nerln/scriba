@@ -37,14 +37,14 @@ DONE_MARK = ".scriba-done"
 VOICE_MEMOS = (Path.home() / "Library" / "Group Containers"
                / "group.com.apple.VoiceMemos.shared" / "Recordings")
 
-# Where the mirror leaves what it copied out of that library.
+# Where paranco leaves what it lifted out of that library.
 #
-# The mirror exists so that nothing else has to hold Full Disk Access. macOS
-# charges an access to the process that asked for it, so a permission cannot be
-# borrowed from Finder or from System Events by driving them: the request comes
-# back charged to whoever was driving. It can only be held by a program with its
-# own identity, started by launchd, which is what ScribaMemoMirror.app is. This
-# folder is ordinary, and reading it needs nothing.
+# paranco (github.com/nerln/paranco) is a separate application that holds Full
+# Disk Access so that nothing here has to. macOS charges an access to the process
+# that asked for it, so a permission cannot be borrowed from Finder or from System
+# Events by driving them: the request comes back charged to whoever was driving.
+# It can only be held by a program with its own identity, started by launchd or
+# by a person. This folder is ordinary, and reading it needs nothing.
 INBOX = DATA_DIR / "inbox"
 
 

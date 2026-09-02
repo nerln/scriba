@@ -224,16 +224,16 @@ def memos(
             console.print(
                 "macOS keeps the Voice Memos library closed to this process, and "
                 "that is the right default.\n"
-                "  Rather than opening your whole disk to scriba, build the mirror: "
-                "a separate\n"
-                "  application that holds that one permission and copies new "
-                "recordings here.\n\n"
-                "    cd macapp && ./make-mirror.sh\n\n"
-                "  It prints the two steps. Everything after that reads an ordinary "
-                "folder.",
+                "  Rather than opening your whole disk to scriba, use paranco: a "
+                "separate application\n"
+                "  that holds that one permission and lifts new recordings into "
+                f"{INBOX}.\n\n"
+                "    github.com/nerln/paranco\n\n"
+                "  Open it, add the \"Voice Memos to scriba\" route, install its agent. "
+                "Everything after\n  that reads an ordinary folder.",
                 style="yellow", markup=False, highlight=False)
             raise typer.Exit(1)
-        console.print(f"reading what the mirror copied into {INBOX}",
+        console.print(f"reading what paranco lifted into {INBOX}",
                       style="dim", markup=False, highlight=False)
 
     s = _settings(language, None, min_speakers, max_speakers, False)
