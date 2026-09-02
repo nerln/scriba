@@ -229,7 +229,7 @@ def memos(
                 "  that holds that one permission and lifts new recordings into "
                 f"{INBOX}.\n\n"
                 "    github.com/nerln/paranco\n\n"
-                "  Open it, add the \"Voice Memos to scriba\" route, install its agent. "
+                "  Open it, add a route from Voice Memos to that folder, install its agent. "
                 "Everything after\n  that reads an ordinary folder.",
                 style="yellow", markup=False, highlight=False)
             raise typer.Exit(1)

@@ -339,10 +339,10 @@ Python interpreter, and Full Disk Access on a Python interpreter is Full Disk
 Access for every package ever installed beside it. Not recommended.
 
 The other is [paranco](https://github.com/nerln/paranco): a separate application
-whose only job is to hold that one permission and lift new files out of protected
-folders into ordinary ones, along routes you define. It ships with a "Voice Memos
-to scriba" route that delivers into `~/.scriba/inbox`. scriba then reads an
-ordinary folder and needs nothing at all.
+whose only job is to hold that one permission and lift new files out of a short,
+compiled-in list of protected folders into ordinary ones, along routes you define.
+Add a route from Voice Memos to `~/.scriba/inbox` and install its agent. scriba
+then reads an ordinary folder and needs nothing at all.
 
 It has to be an application started by launchd or by a person, and that is not
 ceremony. macOS charges an access to the process that asked for it, so a
