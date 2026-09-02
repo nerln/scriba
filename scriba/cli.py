@@ -192,6 +192,67 @@ def watch(
 
 
 @app.command()
+def memos(
+    language: str = typer.Option("auto", "--lang", "-l"),
+    min_speakers: int = typer.Option(None, "--min-speakers"),
+    max_speakers: int = typer.Option(None, "--max-speakers"),
+    once: bool = typer.Option(False, "--once",
+                             help="Transcribe what is there and stop, rather than waiting"),
+):
+    """Watch the Voice Memos library and transcribe every new recording.
+
+    The recordings are already there, so this is the shortest path from talking
+    into a phone to a document that says who said what. Nothing is written into
+    Apple's folder: the list of what has been done goes under ~/.scriba.
+
+    macOS protects that folder. The first run says so plainly if it is blocked,
+    because the error the system gives back is indistinguishable from an empty
+    library and that is a bad thing to be told when you have two hundred memos.
+    """
+    from .watch import VOICE_MEMOS, readable
+    from .watch import watch as _watch
+
+    ok, why = readable(VOICE_MEMOS)
+    if not ok:
+        console.print(why, style="yellow", markup=False, highlight=False)
+        raise typer.Exit(1)
+
+    s = _settings(language, None, min_speakers, max_speakers, False)
+    if once:
+        _run_folder_once(VOICE_MEMOS, s)
+        return
+    _watch(VOICE_MEMOS, s, create=False,
+           report=lambda m: console.print(m, style="dim", markup=False, highlight=False))
+
+
+def _run_folder_once(folder: Path, s) -> None:
+    """Everything in the folder that has not been done, then stop.
+
+    For a machine that is not left running, and for the first pass over a library
+    that already has a year of recordings in it.
+    """
+    from .audio import is_audio
+    from .watch import ledger_for
+
+    done_dir = ledger_for(folder)
+    already = {p.name for p in done_dir.glob("*")}
+    waiting = [p for p in sorted(folder.iterdir())
+               if p.is_file() and is_audio(p) and p.name not in already]
+    if not waiting:
+        console.print("Nothing new in the library.", markup=False, highlight=False)
+        return
+
+    console.print(f"{len(waiting)} recordings to do.", markup=False, highlight=False)
+    for path in waiting:
+        console.rule(f"[bold]{path.name}")
+        try:
+            _run_one(path, s, None, "Voice Memos")
+            (done_dir / path.name).touch()
+        except (FileNotFoundError, ValueError, RuntimeError, json.JSONDecodeError) as e:
+            console.print(f"  {_readable(e)}", style="red", markup=False, highlight=False)
+
+
+@app.command()
 def whoami(
     folder: Path = typer.Argument(..., help="Folder of recordings to scan"),
     name: str = typer.Option(None, "--name", "-n",

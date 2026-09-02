@@ -1,10 +1,17 @@
 """Watched folder: drop an audio file in, a transcript comes out.
 
-Why a folder and not Voice Memos directly: the Voice Memos library lives in
-`~/Library/Group Containers/group.com.apple.VoiceMemos.shared/` and is protected by
-TCC. Not even your own user can read it without granting Full Disk Access to the
-process that tries. A plain folder, fed by a Shortcut or by iCloud, gets the same
-result, and nobody has to weaken the system's protections.
+It also watches the Voice Memos library, which is where the recordings already
+are and is the reason anybody would want this. That folder lives under
+`~/Library/Group Containers/group.com.apple.VoiceMemos.shared/` and macOS protects
+it: not even your own user can read it until Full Disk Access is granted to the
+process doing the reading. `scriba memos` says so in as many words rather than
+reporting an empty folder, which is what the operating system's error looks like
+from the inside.
+
+Nothing is ever written into a watched folder that will not take it. The ledger of
+what has been processed normally sits in the folder itself, so it travels with it;
+where the folder is read-only, or belongs to another application, it goes under
+~/.scriba/watch instead. Apple's container is not ours to leave files in.
 
 The polling is deliberately naive: a loop with `sleep`. FSEvents would notify sooner.
 It also fires *while* a 200 MB file is still being copied, and at that point you would
@@ -20,10 +27,64 @@ from pathlib import Path
 from typing import Callable
 
 from .audio import is_audio
-from .config import Settings
+from .config import DATA_DIR, Settings
 from .pipeline import Job
 
 DONE_MARK = ".scriba-done"
+
+# Where macOS keeps what the Voice Memos app records. Same path on the machines
+# that have the app at all; the app has not moved it in years.
+VOICE_MEMOS = (Path.home() / "Library" / "Group Containers"
+               / "group.com.apple.VoiceMemos.shared" / "Recordings")
+
+
+def readable(folder: Path) -> tuple[bool, str]:
+    """Whether this process can list the folder, and what to do when it cannot.
+
+    macOS answers a protected folder with the same error it uses for a missing
+    one, so a caller that only checks `exists()` reports an empty library to
+    somebody who has two hundred recordings in it.
+    """
+    folder = Path(folder).expanduser()
+    if not folder.exists():
+        return False, f"there is no folder at {folder}"
+    try:
+        next(iter(folder.iterdir()), None)
+    except PermissionError:
+        return False, (
+            f"macOS will not let this process read {folder}.\n"
+            "  Give Full Disk Access to whatever runs scriba, in System Settings > "
+            "Privacy & Security > Full Disk Access:\n"
+            "  the Terminal if you run it from a terminal, or Scriba.app if you use "
+            "the window. Then start it again.")
+    except OSError as exc:
+        return False, f"{folder} cannot be read: {exc}"
+    return True, ""
+
+
+def ledger_for(folder: Path) -> Path:
+    """Where to record what has already been processed.
+
+    Inside the folder when the folder will have it, because then the ledger
+    travels with the recordings and moving them somewhere else does not cause two
+    hundred transcriptions. Under ~/.scriba when it will not, which is the case
+    for anything belonging to another application.
+    """
+    folder = Path(folder).expanduser().resolve()
+    inside = folder / DONE_MARK
+    try:
+        inside.mkdir(exist_ok=True)
+        probe = inside / ".writable"
+        probe.touch()
+        probe.unlink()
+        return inside
+    except OSError:
+        pass
+    import hashlib
+    digest = hashlib.sha1(str(folder).encode()).hexdigest()[:10]
+    outside = DATA_DIR / "watch" / f"{folder.name}-{digest}"
+    outside.mkdir(parents=True, exist_ok=True)
+    return outside
 
 
 def watch(
@@ -32,11 +93,18 @@ def watch(
     *,
     interval: float = 5.0,
     report: Callable[[str], None] = print,
+    create: bool = True,
 ) -> None:
     folder = Path(folder).expanduser().resolve()
-    folder.mkdir(parents=True, exist_ok=True)
-    done_dir = folder / DONE_MARK
-    done_dir.mkdir(exist_ok=True)
+    if create:
+        # Only for a folder that is ours to make. Pointing this at somebody else's
+        # library and having it created empty is how you end up watching a folder
+        # the recordings are not in.
+        folder.mkdir(parents=True, exist_ok=True)
+    ok, why = readable(folder)
+    if not ok:
+        raise PermissionError(why)
+    done_dir = ledger_for(folder)
 
     seen: dict[Path, int] = {}
     processed: set[str] = {p.name for p in done_dir.glob("*")}
@@ -57,6 +125,9 @@ def watch(
     failed: dict[str, int] = {}
 
     report(f"watching {folder}  (ctrl-c to stop)")
+    if done_dir.parent != folder:
+        report(f"keeping the list of what is done in {done_dir}, because that "
+               "folder is not ours to write in")
     if processed:
         report(f"{len(processed)} files already processed earlier: skipping them")
 

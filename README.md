@@ -321,6 +321,33 @@ folder of recordings contains hundreds of those comparisons already. `whoami` pr
 where the two populations separate in your own material, so the number is measured
 rather than assumed.
 
+## Voice memos, without moving them
+
+The recordings are already on the machine. `scriba memos` watches the Voice Memos
+library and transcribes each new one as it appears:
+
+```bash
+scriba memos                 # waits for new recordings
+scriba memos --once          # does what is already there, then stops
+```
+
+macOS protects that folder, so the first run will probably refuse. Give Full Disk
+Access to whatever runs scriba, in System Settings > Privacy & Security > Full
+Disk Access: the Terminal if you use the terminal, Scriba.app if you use the
+window. The command says so itself rather than reporting an empty library, which
+is what the system's own error looks like from the inside.
+
+Nothing is written into Apple's folder. The list of what has been done goes under
+`~/.scriba/watch/`, and the recordings are read and never touched. That applies to
+any watched folder that will not take a file: the ledger normally lives inside the
+folder so it travels with it, and moves out of the way when it cannot.
+
+To have it running without being asked, a launchd agent at
+`~/Library/LaunchAgents/dev.nerelli.scriba.memos.plist` pointing at `scriba memos`
+does it. Worth knowing before you do: transcription uses the whole machine for
+about as long as the recording lasts, so an unattended watcher will make itself
+felt on a laptop.
+
 ## The app
 
 ```bash
