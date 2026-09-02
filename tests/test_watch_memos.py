@@ -110,3 +110,22 @@ def test_watching_does_not_create_somebody_elses_library(tmp_path):
 def test_the_voice_memos_path_is_where_macos_keeps_them():
     assert w.VOICE_MEMOS.name == "Recordings"
     assert "group.com.apple.VoiceMemos.shared" in str(w.VOICE_MEMOS)
+
+
+def test_the_inbox_is_an_ordinary_folder_under_our_own_data(monkeypatch, tmp_path):
+    """Which is the whole point of the mirror.
+
+    Reading Apple's library needs Full Disk Access. Rather than granting that to
+    whatever runs scriba, which in practice means a Python interpreter and every
+    package ever installed beside it, a separate application holds the permission
+    and copies here. This folder needs nothing.
+    """
+    assert w.INBOX.name == "inbox"
+    assert w.readable(tmp_path) == (True, "")
+
+
+def test_the_inbox_ledger_stays_inside_the_inbox(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "DATA_DIR", tmp_path)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    assert w.ledger_for(inbox) == inbox / w.DONE_MARK

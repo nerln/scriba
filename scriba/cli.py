@@ -209,19 +209,38 @@ def memos(
     because the error the system gives back is indistinguishable from an empty
     library and that is a bad thing to be told when you have two hundred memos.
     """
-    from .watch import VOICE_MEMOS, readable
+    from .watch import INBOX, VOICE_MEMOS, readable
     from .watch import watch as _watch
 
-    ok, why = readable(VOICE_MEMOS)
+    folder = VOICE_MEMOS
+    ok, _ = readable(VOICE_MEMOS)
     if not ok:
-        console.print(why, style="yellow", markup=False, highlight=False)
-        raise typer.Exit(1)
+        # The library is closed to us, which is the normal case and not a fault.
+        # The mirror is a separate application that holds the permission on its
+        # own, so nothing here has to. If it has run, its inbox is where the
+        # recordings are.
+        folder = INBOX
+        if not INBOX.exists() or not any(INBOX.iterdir()):
+            console.print(
+                "macOS keeps the Voice Memos library closed to this process, and "
+                "that is the right default.\n"
+                "  Rather than opening your whole disk to scriba, build the mirror: "
+                "a separate\n"
+                "  application that holds that one permission and copies new "
+                "recordings here.\n\n"
+                "    cd macapp && ./make-mirror.sh\n\n"
+                "  It prints the two steps. Everything after that reads an ordinary "
+                "folder.",
+                style="yellow", markup=False, highlight=False)
+            raise typer.Exit(1)
+        console.print(f"reading what the mirror copied into {INBOX}",
+                      style="dim", markup=False, highlight=False)
 
     s = _settings(language, None, min_speakers, max_speakers, False)
     if once:
-        _run_folder_once(VOICE_MEMOS, s)
+        _run_folder_once(folder, s)
         return
-    _watch(VOICE_MEMOS, s, create=False,
+    _watch(folder, s, create=False,
            report=lambda m: console.print(m, style="dim", markup=False, highlight=False))
 
 
