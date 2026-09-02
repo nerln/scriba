@@ -10,6 +10,7 @@
 <meta property="og:image" content="https://nerln.github.io/scriba/img/04-who-is-speaking.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
+<link rel="canonical" href="https://nerln.github.io/scriba/">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230E0D0C'/><g fill='%23E0A458'><circle cx='20' cy='29' r='4'/><circle cx='20' cy='39' r='4'/></g><g fill='%23EDE8DE'><rect x='32' y='25' width='20' height='6' rx='3'/><rect x='32' y='37' width='13' height='6' rx='3'/></g></svg>">
 
 <style>
@@ -641,11 +642,51 @@ scriba name meeting.m4a \
 <span class="c"># and from here on</span>
 scriba voices list
 scriba watch ~/Memos
+scriba memos
 scriba jobs list</pre>
         <figcaption style="margin-top:1rem">
           The macOS app runs this same command and reads its JSON. There is no second
           copy of the logic to drift apart a day later.
         </figcaption>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- voice memos -->
+<section class="tight">
+  <div class="wrap">
+    <div class="split top">
+      <div>
+        <h2 class="rise">Voice memos,<br>without moving them.</h2>
+      </div>
+      <div class="rise">
+        <p class="lede">
+          The recordings are already on the machine. <code>scriba memos</code> watches the
+          Voice Memos library and transcribes each new one as it appears.
+        </p>
+        <pre><span class="c"># waits for new recordings</span>
+scriba memos
+
+<span class="c"># does what is already there, then stops</span>
+scriba memos <span class="p">--once</span></pre>
+        <p style="margin-top:1.5rem">
+          macOS keeps that folder closed, and the first run says so. The blunt way past it
+          is Full Disk Access for whatever runs scriba, in practice a Python interpreter,
+          and Full Disk Access on a Python interpreter is Full Disk Access for every
+          package installed beside it.
+        </p>
+        <p>
+          The other way is <a href="https://github.com/nerln/paranco">paranco</a>: a
+          separate application whose only job is to hold that one permission and lift new
+          files out of a short list of protected folders into ordinary ones. Add a route
+          from Voice Memos to <code>~/.scriba/inbox</code> and scriba reads an ordinary
+          folder and needs nothing at all.
+        </p>
+        <p style="color:var(--text-dim)">
+          <code>scriba memos</code> uses the library directly when it can, and the inbox
+          when it cannot, and says which.
+        </p>
       </div>
     </div>
   </div>
