@@ -427,7 +427,7 @@ it in place, the same 6:45 recording:
 
 | | Transcription | Words |
 |---|---|---|
-| CPU, int8 | 227s | 706 |
+| CPU, int8 | 246s | 706 |
 | Metal, float16 | 91s | 700 |
 
 Two and a half times faster for the same words, and the difference is only where
@@ -451,6 +451,13 @@ falling back to the CPU stops working. `CMAKE_POLICY_VERSION_MINIMUM` is needed 
 CMake 4 because a vendored dependency declares an ancient minimum. Both were missing
 from the branch's own instructions when this was written; they are in its
 documentation now, after they cost an hour here and got reported.
+
+Re-measured again at head dcf9306f on 7 September 2026, which is the build
+installed here now. That head makes a request for `int8` on Metal resolve to
+`float16` instead of running a native INT8 path, and for scriba it changes
+nothing: Metal came out at 91s again, CPU at 246s against 227s the week before,
+which is the machine and not the library. scriba never asked for int8 on the GPU,
+so the path that got faster is not one it was on.
 
 Rebuilt and re-measured at head 74b510a0 on 31 August 2026. The documented line
 configures and builds as written, and the C++ suite from that same MPS-enabled
