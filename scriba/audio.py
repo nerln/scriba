@@ -9,6 +9,7 @@ diarization the most.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -66,6 +67,46 @@ def _number(value, default: float) -> float:
         return default
 
 
+# APFS marks a file whose contents a sync service has taken away. The name stays
+# in the folder, the size is still reported, and a read either brings the bytes
+# back or fails. Python's stat module has no name for the bit, so here it is.
+SF_DATALESS = 0x40000000
+
+
+def placeholder(path: Path) -> str | None:
+    """Why this file's contents are not on this Mac, or None if they are.
+
+    The name of a recording sitting in a folder is not the recording. iCloud, and
+    any application that keeps this Mac's copy small, leave the name and take
+    the bytes, and a copy made from that leaves a few kilobytes of header with
+    nothing after them. ffprobe then says "moov atom not found", which is true
+    and tells nobody what happened. Measured on one library: 103 recordings of
+    176 were this, and 8 more were the header-only copies.
+
+    Nothing here knows which application owns the file. The checks are the
+    filesystem's flag, a size with no blocks behind it, and a container too
+    small to hold a second of audio.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if getattr(st, "st_flags", 0) & SF_DATALESS:
+        return (f"{path.name} is a placeholder: its contents are held by a cloud "
+                "service and are not on this Mac. Open it in the application it "
+                "belongs to so it is downloaded, then try again.")
+    if st.st_size > 0 and getattr(st, "st_blocks", 1) == 0:
+        return (f"{path.name} reports a size and holds no data: a cloud service has "
+                "its contents. Open it in the application it belongs to, then try again.")
+    if 0 < st.st_size < 64 * 1024:
+        # A real recording of any length is bigger than this. What fits in
+        # sixty-four kilobytes is the header of a file whose body never arrived.
+        return (f"{path.name} is {st.st_size // 1024} KB, which is a header with no "
+                "audio behind it: the copy was made before the recording had been "
+                "downloaded to this Mac. Download it where it lives and copy it again.")
+    return None
+
+
 def probe(path: Path) -> AudioInfo:
     probe_exe = _ffprobe()
     if not probe_exe:
@@ -76,9 +117,15 @@ def probe(path: Path) -> AudioInfo:
         capture_output=True, text=True,
     )
     if out.returncode != 0:
-        # An empty file, a download that stopped halfway, a .m4a that is really
-        # something else. ffprobe knows what is wrong and says so on stderr, and that
-        # sentence is more useful than the CalledProcessError that used to surface.
+        # Say the human thing first, when there is one. A placeholder or a
+        # header-only copy is the common case behind an unreadable recording, and
+        # "moov atom not found" is true of it without being any use.
+        why = placeholder(path)
+        if why:
+            raise RuntimeError(why)
+        # Otherwise: an empty file, a .m4a that is really something else. ffprobe
+        # knows what is wrong and says so on stderr, and that sentence is more
+        # useful than the CalledProcessError that used to surface.
         detail = (out.stderr or "").strip().splitlines()
         raise RuntimeError(
             f"cannot read {path.name} as audio: "
