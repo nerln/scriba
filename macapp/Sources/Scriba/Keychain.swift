@@ -44,6 +44,13 @@ enum Keychain {
         // item's attributes exactly, and an item written by the `security` command
         // does not necessarily carry the same ones as an item written here; the
         // update then succeeds against nothing and the old token survives.
+        //
+        // The delete can also be refused. An item belongs to the program that
+        // made it, and this application is a different program from the
+        // `security` tool, and from its own previous build, because an ad-hoc
+        // signature changes with every compile. The Keychain then keeps the old
+        // item, the add finds a duplicate, and the person is told the item
+        // already exists, which is true and not something they can act on.
         SecItemDelete(query(service) as CFDictionary)
 
         var item = query(service)
@@ -54,8 +61,22 @@ enum Keychain {
         // condition the command-line tool writes under.
         item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
 
-        let status = SecItemAdd(item as CFDictionary, nil)
+        var status = SecItemAdd(item as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            // Second attempt: change the existing item in place. This works when
+            // the old item will let this program touch it, which is the common
+            // case for one written by an earlier build of this same application.
+            status = SecItemUpdate(query(service) as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        }
         guard status == errSecSuccess else {
+            if status == errSecDuplicateItem || status == errSecAuthFailed
+                || status == errSecInteractionNotAllowed {
+                return "An older token is in the Keychain and this application is "
+                     + "not allowed to replace it, because a different program put "
+                     + "it there. Remove it from a terminal, then save again:\n"
+                     + "security delete-generic-password -s \(service)"
+            }
             return SecCopyErrorMessageString(status, nil) as String?
                 ?? "The Keychain refused it (error \(status))."
         }
