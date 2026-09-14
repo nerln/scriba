@@ -387,6 +387,10 @@ struct ContentView: View {
                 // copied in a second time be offered a second time.
                 Dismissed.prune(keeping: Set(present.map { canonicalPath($0.url.path) }))
                 dismissed = Dismissed.load()
+                // Rows the engine reached by another road are no longer waiting
+                // on this window: the job list has them now, running or done.
+                let gone = queue.reconcileInbox(known: known)
+                if case .pending(let id) = selection, gone.contains(id) { selection = nil }
                 enqueue(Inbox.waiting(among: present, known: known, dismissed: dismissed),
                         select: false)
             }

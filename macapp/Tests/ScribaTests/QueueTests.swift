@@ -45,9 +45,9 @@ struct QueueTests {
     func headerWithFailures() {
         var q = Queue()
         q.items = [Self.item("a.m4a", .failed("no audio track")), Self.item("b.m4a")]
-        #expect(q.title == "Waiting to be transcribed (1) · 1 did not finish")
+        #expect(q.title == "Waiting to be transcribed (1) · 1 with a problem")
         q.items = [Self.item("a.m4a", .failed("x")), Self.item("b.m4a", .failed("y"))]
-        #expect(q.title == "2 did not finish")
+        #expect(q.title == "2 with a problem")
     }
 
     @Test("rows that just finished do not read as waiting")
@@ -149,6 +149,21 @@ struct QueueTests {
         #expect(q.items[0].state == .waiting)
         #expect(q.items[1].state == .failed("x"))
         #expect(q.items[2].state == .finished)
+    }
+
+    @Test("an inbox row leaves once the engine has a job for it; a dropped one stays")
+    func reconcileInbox() {
+        var q = Queue()
+        var inbox = Self.item("a.m4a"); inbox.collection = Inbox.collection
+        var inboxRunning = Self.item("b.m4a", .running); inboxRunning.collection = Inbox.collection
+        let dropped = Self.item("c.m4a")
+        var inboxFresh = Self.item("d.m4a"); inboxFresh.collection = Inbox.collection
+        q.items = [inbox, inboxRunning, dropped, inboxFresh]
+        let known: Set<String> = [canonicalPath("/recordings/a.m4a"), canonicalPath("/recordings/b.m4a"),
+                                  canonicalPath("/recordings/c.m4a")]
+        let gone = q.reconcileInbox(known: known)
+        #expect(gone == [inbox.id])
+        #expect(q.items.map { $0.url.lastPathComponent } == ["b.m4a", "c.m4a", "d.m4a"])
     }
 
     // MARK: files that are not really there

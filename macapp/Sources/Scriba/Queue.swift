@@ -41,7 +41,9 @@ struct Queue: Equatable {
             parts.append("Waiting to be transcribed (\(waiting.count))")
         }
         if !failed.isEmpty {
-            parts.append(failed.count == 1 ? "1 did not finish" : "\(failed.count) did not finish")
+            // "With a problem" rather than "did not finish": half of these never
+            // started, because the file was a header with no audio behind it.
+            parts.append(failed.count == 1 ? "1 with a problem" : "\(failed.count) with a problem")
         }
         if parts.isEmpty { return "Transcribed" }
         return parts.joined(separator: " · ")
@@ -124,6 +126,25 @@ struct Queue: Equatable {
         let item = items.remove(at: i)
         let firstWaiting = items.firstIndex { $0.state == .waiting } ?? items.endIndex
         items.insert(item, at: firstWaiting)
+    }
+
+    /// Drop the inbox rows the engine has got to by another road.
+    ///
+    /// A recording from the inbox can be transcribed from a terminal, or by
+    /// `scriba memos`, while it sits here as waiting. Once a job for it exists
+    /// the row is stale: the job list shows the run, or the document, and a row
+    /// that keeps saying "waiting" over a finished transcript is the kind of
+    /// thing that makes a queue look broken. Rows added by hand are left alone:
+    /// dropping a file that already has a job is how you ask for it again.
+    /// Returns the ids taken out, so the caller can fix the selection.
+    @discardableResult
+    mutating func reconcileInbox(known: Set<String>) -> [UUID] {
+        let stale = items.filter {
+            $0.collection == Inbox.collection && $0.state == .waiting && known.contains($0.path)
+        }
+        let ids = Set(stale.map(\.id))
+        items.removeAll { ids.contains($0.id) }
+        return stale.map(\.id)
     }
 
     /// Everything that was running goes back to waiting: a Stop is not a failure.
