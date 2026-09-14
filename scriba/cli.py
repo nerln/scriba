@@ -87,6 +87,7 @@ def run(
             failures.append((f, _readable(e)))
             console.print(f"  {_readable(e)}", style="red", markup=False,
                           highlight=False)
+            _mark_error(e)
 
     if failures:
         console.print(f"\n[red]{len(failures)} of {len(files)} did not go through:[/red]")
@@ -466,7 +467,13 @@ def _job_dir(target: Path) -> Path:
     from .pipeline import job_slug
 
     target = Path(target).expanduser()
-    if target.is_dir() and (target / "transcript.json").exists():
+    # A job folder is one by where it is, not by how far it got. Requiring a
+    # transcript inside it meant a folder that failed before transcribing was
+    # taken for a recording, given a slug of its own path, and "deleted" with
+    # nothing removed: the row came straight back in the app.
+    if target.is_dir() and (
+            (target / "transcript.json").exists() or (target / "state.json").exists()
+            or target.resolve().parent == JOBS_DIR.resolve()):
         return target
     if target.exists():
         return JOBS_DIR / job_slug(target.resolve())
@@ -618,6 +625,7 @@ def jobs_list(
             "has_output": r.has_output,
             "archived": r.archived,
             "collection": r.collection,
+            "failed": r.failed,
         } for r in rows], ensure_ascii=False))
         return
     if not rows:
@@ -799,6 +807,25 @@ def settings(
     if show:
         console.print_json(json.dumps(asdict(s), ensure_ascii=False))
         console.print(f"[dim]{DATA_DIR}[/dim]")
+
+
+def _mark_error(exc: BaseException) -> None:
+    """One line an application can find, when one is listening.
+
+    The markers are noise in a terminal, so they are printed only when the
+    process was started with SCRIBA_MARKERS set, which the macOS app does. The
+    text is the raw message, marker and all, so the token marker inside it
+    survives too: the app tells that failure apart from the others by it.
+    """
+    import os
+    from .pipeline import ERR_MARK
+
+    if not os.environ.get("SCRIBA_MARKERS"):
+        return
+    first = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+    # Plain print, not the console: rich would wrap it, and a marker split over
+    # two lines is a marker nobody finds.
+    print(f"{ERR_MARK} {first}", flush=True)
 
 
 def _readable(exc: BaseException) -> str:

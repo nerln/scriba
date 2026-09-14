@@ -10,11 +10,15 @@ seconds.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import JOBS_DIR
+
+# The note a run in progress leaves in its job folder (pipeline.py, Job._claim).
+RUNNING_NOTE = "running.json"
 
 
 @dataclass
@@ -35,6 +39,30 @@ class JobRow:
     # tree of recordings and the subfolder is the only thing saying which
     # conversation belongs with which, so it travels into the job.
     collection: str = ""
+    # Why the last run stopped, in the engine's words, or empty. Cleared by a
+    # run that finishes.
+    failed: str = ""
+
+
+def running_pid(job_dir: Path) -> int | None:
+    """The process transcribing this job right now, or None.
+
+    Reads the note `Job._claim` leaves. A note whose process is gone is a crash's
+    leftover and counts as nothing: the folder's files then say what state the
+    job is really in.
+    """
+    try:
+        note = json.loads((job_dir / RUNNING_NOTE).read_text())
+        pid = int(note["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass  # alive, owned by somebody else
+    return pid
 
 
 def _dir_size_mb(path: Path) -> float:
@@ -73,12 +101,21 @@ def inventory() -> list[JobRow]:
             state = {}
 
         out_dir = job_dir / "output"
-        has_output = out_dir.exists() and any(out_dir.iterdir())
+        # Not counting dotfiles. The Finder drops a .DS_Store into any folder
+        # somebody opens, and a job whose only "output" was that was listed as
+        # done, with a document nobody could find.
+        has_output = out_dir.exists() and any(
+            p.name[0] != "." for p in out_dir.iterdir())
         has_transcript = (job_dir / "transcript.json").exists()
         has_diar = (job_dir / "diarization.json").exists()
 
         if has_output:
             what = "done"
+        elif running_pid(job_dir):
+            # Being worked on this minute, by whichever scriba started it. Until
+            # this state existed the app described a run in progress with the
+            # words for a run that had failed.
+            what = "running"
         elif has_transcript and has_diar:
             what = "transcribed"
         elif has_diar:
@@ -104,6 +141,7 @@ def inventory() -> list[JobRow]:
             has_output=has_output,
             archived=bool(state.get("archived")),
             collection=str(state.get("collection") or ""),
+            failed=str(state.get("failed") or ""),
         ))
 
     return sorted(rows, key=lambda r: (r.recorded or "0000", r.source_name), reverse=True)
@@ -183,6 +221,9 @@ def prune(rows: list[JobRow], *, audio: bool, empty: bool,
     targets: list[tuple[Path, float]] = []
 
     for row in rows:
+        if row.state == "running":
+            # Its audio is being read this minute and its emptiness is temporary.
+            continue
         if empty and row.state == "nothing":
             targets.append((row.path, row.size_mb))
             continue

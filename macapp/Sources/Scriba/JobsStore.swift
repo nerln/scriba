@@ -19,6 +19,9 @@ struct JobSummary: Codable, Identifiable, Hashable {
     /// single file. It is the only thing that says which recordings belong
     /// together when somebody adds a tree of them at once.
     var collection: String = ""
+    /// Why the last run stopped, in the engine's words. Empty when it did not
+    /// stop, or when the folder is from before the engine wrote this down.
+    var failed: String = ""
 
     enum CodingKeys: String, CodingKey {
         case jobDir = "job_dir"
@@ -27,13 +30,14 @@ struct JobSummary: Codable, Identifiable, Hashable {
         case recorded, duration, state, names, speakers
         case sizeMb = "size_mb"
         case hasOutput = "has_output"
-        case archived, collection
+        case archived, collection, failed
     }
 
     /// What to show in the list. The engine's words are for a terminal.
     var label: String {
         switch state {
         case "done":        return "Ready to read"
+        case "running":     return "Being transcribed now, outside this window"
         case "transcribed": return "Transcribed, no document written"
         case "voices only": return "Voices separated, words missing"
         case "text only":   return "Words only, voices not separated"
@@ -42,6 +46,30 @@ struct JobSummary: Codable, Identifiable, Hashable {
     }
 
     var isFinished: Bool { state == "done" }
+
+    /// A run somebody else started, from a terminal or another copy of the app,
+    /// is on it this minute. The engine leaves a note in the folder while it
+    /// works; without it this row read as a failure for as long as the run took.
+    var isRunningElsewhere: Bool { state == "running" }
+}
+
+/// The job rows to draw, given which recordings are in the queue right now.
+///
+/// A recording that is queued is already one row, under "Waiting". The job
+/// folder the engine makes for it exists from the first second of the run, so
+/// the list would show the same file twice, with two different descriptions,
+/// after a Stop, after a failure, or when the list was refreshed mid-run.
+func visibleJobs(_ jobs: [JobSummary], hidingQueued paths: Set<String>) -> [JobSummary] {
+    jobs.filter { !paths.contains(canonicalPath($0.sourcePath)) }
+}
+
+/// One spelling for a path, so the queue and the engine agree on which file
+/// they are talking about. The engine resolves symlinks before it writes the
+/// path down (pipeline.py, Job.__init__); the queue holds whatever the Finder
+/// handed over.
+func canonicalPath(_ path: String) -> String {
+    guard !path.isEmpty else { return path }
+    return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
 }
 
 /// A recording waiting to be processed, or being processed now.
@@ -51,6 +79,11 @@ struct QueueItem: Identifiable, Hashable {
         case running
         case finished
         case failed(String)
+
+        var isFailed: Bool {
+            if case .failed = self { return true }
+            return false
+        }
     }
     let id = UUID()
     let url: URL
@@ -62,6 +95,15 @@ struct QueueItem: Identifiable, Hashable {
     /// meant opening every queued file's container on the main thread on every
     /// redraw, which is why dropping a batch of recordings froze the window.
     var minutes: Double?
+    /// The two settings that change what comes out, kept with the recording
+    /// they were chosen for. They used to be one pair of values for the whole
+    /// window, so picking Italian for one file quietly picked it for the next.
+    var language: String = "auto"
+    /// How many people were in the room, 0 for "as many as it finds".
+    var speakers: Int = 0
+
+    /// The file this item stands for, spelled the way the engine spells it.
+    var path: String { canonicalPath(url.path) }
 }
 
 /// The list of everything scriba has touched.

@@ -66,11 +66,30 @@ final class Engine: ObservableObject {
 
     /// One line saying why the last run stopped, for a list that has room for one
     /// line. The alert carries the full text and is dismissed once; this stays.
-    var failureSummary: String {
-        guard let text = errorText, !text.isEmpty else { return "did not finish" }
-        let firstLine = text.split(separator: "\n").first.map(String.init) ?? text
-        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-        return trimmed.count > 90 ? String(trimmed.prefix(88)) + "…" : trimmed
+    var failureSummary: String { Engine.summarise(errorText) }
+
+    /// The one line worth keeping out of an error text.
+    ///
+    /// When the engine could be understood, the text is its own sentence and
+    /// the first line is it. When it could not, the text is "Exit code N." over
+    /// the tail of the log, and the first line said nothing: every failed row
+    /// read "Exit code 1." The engine prints the reason last (cli.py, `run`),
+    /// so the last line that is not the exit code and not the tally is the one.
+    nonisolated static func summarise(_ text: String?) -> String {
+        guard let text, !text.isEmpty else { return "did not finish" }
+        let lines = text.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard let first = lines.first else { return "did not finish" }
+        var chosen = first
+        if first.hasPrefix("Exit code") {
+            let telling = lines.dropFirst().filter {
+                !$0.hasPrefix("Exit code") && !$0.hasSuffix("did not go through:")
+                    && !$0.hasPrefix("─")
+            }
+            chosen = telling.last ?? first
+        }
+        return chosen.count > 90 ? String(chosen.prefix(88)) + "…" : chosen
     }
 
     // MARK: - configuration
@@ -118,6 +137,11 @@ final class Engine: ObservableObject {
     /// crosses the Python/Swift boundary, so it is spelled out in one place on
     /// each side rather than buried inside a condition.
     static let errNoToken = "[scriba:error:hf-token]"
+    /// Mirrors ERR_MARK. Printed by the engine once per failed file, on its own
+    /// line, when SCRIBA_MARKERS is set in its environment, which `launch`
+    /// does. The line carries the reason, so the row can show the reason
+    /// rather than the exit code.
+    static let errMark = "[scriba:error]"
 
     // MARK: - execution
 
@@ -195,6 +219,7 @@ final class Engine: ObservableObject {
                          "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         env["PATH"] = (extraPath + [env["PATH"] ?? ""]).joined(separator: ":")
         env["TOKENIZERS_PARALLELISM"] = "false"
+        env["SCRIBA_MARKERS"] = "1"
         env["OMP_NUM_THREADS"] = String(max(ProcessInfo.processInfo.activeProcessorCount / 2, 1))
         proc.environment = env
 
@@ -229,15 +254,17 @@ final class Engine: ObservableObject {
             Task { @MainActor in
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
+                // Stop, then start again straight away, and this handler belongs
+                // to the process that was killed. Letting it run marked the new
+                // run as failed and cleared the state out from under it; letting
+                // it read its tail first wrote the killed run's last line into
+                // the new run's progress.
+                guard self?.process == nil || self?.process === p else { return }
                 for data in [tail, errTail] {
                     if let data, let text = String(data: data, encoding: .utf8) {
                         self?.ingest(text + "\n")
                     }
                 }
-                // Stop, then start again straight away, and this handler belongs
-                // to the process that was killed. Letting it run marked the new
-                // run as failed and cleared the state out from under it.
-                guard self?.process == nil || self?.process === p else { return }
                 self?.isRunning = false
                 self?.process = nil
                 if self?.wasCancelled == true {
@@ -346,6 +373,10 @@ final class Engine: ObservableObject {
             // on a path no test covers. Keep this in step with ERR_NO_TOKEN in pipeline.py.
             if clean.contains(Engine.errNoToken) {
                 errorText = clean.replacingOccurrences(of: Engine.errNoToken, with: "")
+                    .replacingOccurrences(of: Engine.errMark, with: "")
+                    .trimmingCharacters(in: .whitespaces)
+            } else if clean.hasPrefix(Engine.errMark) {
+                errorText = String(clean.dropFirst(Engine.errMark.count))
                     .trimmingCharacters(in: .whitespaces)
             }
         }

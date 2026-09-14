@@ -49,7 +49,10 @@ struct ScribaApp: App {
                 // the other way round.
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 Divider()
-                Button("Start the queue") {
+                // The same words as the button at the bottom of the sidebar. It
+                // was "Start the queue" here and "Transcribe" in the window, and
+                // the two did different things with nothing saying which.
+                Button("Transcribe all") {
                     NotificationCenter.default.post(name: .scribaStart, object: nil)
                 }
                 .keyboardShortcut("t", modifiers: .command)

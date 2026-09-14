@@ -131,3 +131,11 @@ func humanDuration(_ seconds: Double) -> String {
     if s < 60 { return "\(s) s" }
     return "\(s / 60) min \(s % 60) s"
 }
+
+/// For a list row: one number and one unit. A 45-second memo used to read
+/// "0 min", which is a length nothing has.
+func shortDuration(_ seconds: Double) -> String {
+    let s = max(0, Int(seconds.rounded()))
+    if s < 60 { return "\(s) s" }
+    return "\(s / 60) min"
+}

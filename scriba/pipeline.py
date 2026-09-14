@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import zipfile
 import re
 import unicodedata
@@ -22,6 +23,7 @@ import numpy as np
 
 from . import asr, audio, diarize, export, lang, naming
 from .config import JOBS_DIR, Settings, ensure_dirs, hf_token, model_cache_problem, write_atomic
+from .jobs import RUNNING_NOTE
 from .voices import VoiceRegistry
 
 Reporter = Callable[[str], None]
@@ -36,6 +38,12 @@ Reporter = Callable[[str], None]
 # moment the sentence was reworded, on an error path no test exercises. A marker is
 # ugly in a terminal and impossible to break by accident; prose is the opposite.
 ERR_NO_TOKEN = "[scriba:error:hf-token]"
+# The general one: printed once per failed file, on its own line, when the
+# environment says an application is reading the output (SCRIBA_MARKERS=1). In a
+# terminal it is not printed at all. The app used to have nothing to quote but
+# the exit code, because the readable message above it was six lines up in a log
+# it only kept the tail of.
+ERR_MARK = "[scriba:error]"
 
 
 def slugify(text: str) -> str:
@@ -61,6 +69,7 @@ def job_slug(source: Path) -> str:
     """
     digest = hashlib.sha1(str(source.parent).encode()).hexdigest()[:6]
     return f"{slugify(source.stem)}-{digest}"
+
 
 
 @dataclass
@@ -93,7 +102,12 @@ class Job:
         ensure_dirs()
         self.source = Path(source).expanduser().resolve()
         if not self.source.exists():
-            raise FileNotFoundError(self.source)
+            # Worded, because the bare path is what reached the screen: a queued
+            # recording moved or unmounted before its turn failed with nothing
+            # but its old location as the explanation.
+            raise FileNotFoundError(
+                f"{self.source.name} is no longer at {self.source.parent}. "
+                "It was moved, renamed or its disk is not connected.")
         # Refuse before creating anything. The folder used to be made first, so
         # pointing this at a README left a job directory named after it, listed
         # for ever as state "nothing" until somebody ran prune.
@@ -110,11 +124,34 @@ class Job:
         self.state: dict[str, Any] = (
             json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
         )
+        # Say which file this is before anything can fail. The source used to be
+        # written only after the audio was converted, so a run that stopped
+        # before that, on a video with no audio track or a missing ffmpeg, left
+        # a folder the list could only name by its slug.
+        if self.state.get("source") != str(self.source):
+            self.state["source"] = str(self.source)
+            self._save_state()
 
     # ------------------------------------------------------------------ util
     def _save_state(self) -> None:
         write_atomic(self.state_path,
                      json.dumps(self.state, indent=2, ensure_ascii=False, default=str))
+
+    # A run in progress leaves a note in its folder saying so, with its process
+    # id. Without it a job being transcribed from a terminal was listed by the
+    # app as "started and produced nothing", which is the description of a
+    # failure, for as long as the run lasted. The note is removed when the run
+    # ends however it ends; one left behind by a crash names a process that no
+    # longer exists, and `jobs.running_pid` treats that as no note at all.
+    def _claim(self) -> None:
+        write_atomic(self.dir / RUNNING_NOTE, json.dumps(
+            {"pid": os.getpid(), "started": datetime.now().isoformat(timespec="seconds")}))
+
+    def _release(self) -> None:
+        try:
+            (self.dir / RUNNING_NOTE).unlink()
+        except FileNotFoundError:
+            pass
 
     # ------------------------------------------------------- cache validity
     #
@@ -406,6 +443,24 @@ class Job:
         # whichever library got there first.
         if problem := model_cache_problem():
             raise RuntimeError(problem)
+        self._claim()
+        try:
+            result = self._run(force=force)
+        except Exception as exc:
+            # Written down, so the folder can say why it stopped. Until now the
+            # reason lived in the terminal that printed it and nowhere else, and
+            # the app's "Not finished" panel could list what was missing but
+            # never what went wrong.
+            self.state["failed"] = str(exc).replace(ERR_NO_TOKEN, "").strip()[:600]
+            self._save_state()
+            raise
+        finally:
+            self._release()
+        self.state.pop("failed", None)
+        self._save_state()
+        return result
+
+    def _run(self, *, force: str | None) -> JobResult:
         f_all = force == "all"
         self._drop_stale_cache()
         self.prepare_audio(force=f_all)

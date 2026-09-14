@@ -342,7 +342,10 @@ The other is [paranco](https://github.com/nerln/paranco): a separate application
 whose only job is to hold that one permission and lift new files out of a short,
 compiled-in list of protected folders into ordinary ones, along routes you define.
 Add a route from Voice Memos to `~/.scriba/inbox` and install its agent. scriba
-then reads an ordinary folder and needs nothing at all.
+then reads an ordinary folder and needs nothing at all. The app looks in that
+folder whenever the window comes to the front and lists what it finds as waiting,
+so a memo that came off the phone is in the queue before anybody asks; nothing
+starts until the button is pressed. A row swiped away stays away.
 
 It has to be an application started by launchd or by a person, and that is not
 ceremony. macOS charges an access to the process that asked for it, so a
@@ -363,7 +366,7 @@ folder so it travels with it, and moves out of the way when it cannot.
 To have it running without being asked, a launchd agent at
 `~/Library/LaunchAgents/dev.nerelli.scriba.memos.plist` pointing at `scriba memos`
 does it. Worth knowing before you do: transcription uses the whole machine for
-about as long as the recording lasts, so an unattended watcher will make itself
+up to half the length of the recording, so an unattended watcher will make itself
 felt on a laptop.
 
 ## The app
@@ -391,15 +394,24 @@ installed `scriba`, and both fields say whether what you typed is there. The sec
 field, the package folder, only matters when you are running from a clone; a pip
 install can leave it alone.
 
+The queue is the list at the top of the sidebar. Its header counts what is
+waiting, says when one is running and how many did not finish; the button under
+the sidebar starts everything with an estimate of the time next to it, and the
+Transcribe button on one recording starts that one alone. Language and the number
+of people belong to each recording, with a shortcut to give the same settings to
+every one still waiting. The list survives a quit: what was waiting is waiting
+again at the next launch.
+
 A run can be stopped from the strip under the sidebar or from the Transcribe menu,
 and quitting the app stops the engine with it. The keys are the ones a Mac
-application puts them on: `cmd O` to add recordings, `cmd T` to start the queue,
+application puts them on: `cmd O` to add recordings, `cmd T` to transcribe all,
 `cmd .` to stop, `cmd R` to re-read the list.
 
 The window stays usable while a transcription runs. That took saying twice, because
-the first version handed the whole detail pane to the progress display, and a
-transcription lasts about as long as the recording does. The strip says what is
-happening from wherever you are in the app; the pane is yours.
+the first version handed the whole detail pane to the progress display, and a run
+takes up to half the length of the recording. The strip says what is happening
+from wherever you are in the app; the pane is yours. A run started from a
+terminal shows in the list as running, not as a failure, for as long as it lasts.
 
 ## Speed, and why it is what it is
 

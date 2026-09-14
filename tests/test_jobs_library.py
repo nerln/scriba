@@ -110,3 +110,38 @@ def test_the_collection_travels_with_the_job(library):
 def test_a_job_with_no_collection_reports_an_empty_one(library):
     library("memo-aaa111")
     assert jobs.inventory()[0].collection == ""
+
+
+# --------------------------------------------------------------------------- #
+# naming a job folder on the command line
+# --------------------------------------------------------------------------- #
+
+def test_a_job_folder_that_never_transcribed_is_still_a_job_folder(tmp_path, monkeypatch):
+    """`scriba jobs forget <folder>` on a folder that failed before transcribing.
+
+    It used to be taken for a recording, given a slug of its own path, and
+    "deleted" with nothing removed. The row came straight back in the app.
+    """
+    from scriba import cli, config
+
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir()
+    monkeypatch.setattr(config, "JOBS_DIR", jobs_dir)
+    monkeypatch.setattr(jobs, "JOBS_DIR", jobs_dir)
+
+    fell = jobs_dir / "caduto-ab12cd"
+    fell.mkdir()
+    (fell / "state.json").write_text(json.dumps({"source": "/audio/caduto.m4a"}))
+    assert cli._job_dir(fell) == fell
+
+    bare = jobs_dir / "vuoto-ef34ab"
+    bare.mkdir()
+    assert cli._job_dir(bare) == bare
+
+    finished = jobs_dir / "finito-1234ab"
+    finished.mkdir()
+    (finished / "transcript.json").write_text("{}")
+    assert cli._job_dir(finished) == finished
+
+    assert jobs.forget(cli._job_dir(fell)) >= 0.0
+    assert not fell.exists()

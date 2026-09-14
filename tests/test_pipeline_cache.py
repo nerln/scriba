@@ -880,3 +880,92 @@ def test_the_missing_token_error_carries_the_marker(tmp_path):
     # The app strips the marker and shows the rest, so the rest has to be useful.
     human = message.replace(pipeline.ERR_NO_TOKEN, "").strip()
     assert "scriba token" in human and len(human) > 20
+
+
+def test_err_mark_is_exactly_this_string():
+    """Engine.swift matches on it too."""
+    assert pipeline.ERR_MARK == "[scriba:error]"
+
+
+def test_the_swift_side_spells_the_general_marker_the_same_way():
+    engine = Path(__file__).resolve().parents[1] / "macapp/Sources/Scriba/Engine.swift"
+    if not engine.exists():                     # pragma: no cover
+        pytest.skip("the macOS app is not in this checkout")
+    assert f'"{pipeline.ERR_MARK}"' in engine.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# what a job folder says about itself before and during a run
+# --------------------------------------------------------------------------- #
+
+def test_the_source_is_written_the_moment_the_job_exists(tmp_path):
+    # A run that fails before the audio is converted used to leave a folder
+    # the list could only name by its slug.
+    source = audio_file(tmp_path / "memos", "colloquio.m4a")
+    job = make_job(source)
+    state = json.loads(job.state_path.read_text())
+    assert state["source"] == str(source.resolve())
+
+
+def test_a_missing_source_is_refused_with_a_sentence(tmp_path):
+    gone = tmp_path / "memos" / "sparito.m4a"
+    with pytest.raises(FileNotFoundError) as err:
+        make_job(gone)
+    message = str(err.value)
+    assert "sparito.m4a" in message
+    assert "no longer" in message
+    assert message != str(gone)
+
+
+def test_a_run_leaves_a_note_while_it_lasts_and_takes_it_away_after(tmp_path, monkeypatch):
+    from scriba import jobs as jobs_mod
+
+    job = make_job(audio_file(tmp_path / "memos"))
+    seen: dict[str, object] = {}
+
+    def fake_run(*, force):
+        seen["during"] = jobs_mod.running_pid(job.dir)
+        seen["note"] = json.loads((job.dir / jobs_mod.RUNNING_NOTE).read_text())
+        return "result"
+
+    monkeypatch.setattr(job, "_run", fake_run)
+    monkeypatch.setattr(pipeline, "model_cache_problem", lambda: None)
+    assert job.run() == "result"
+    assert seen["during"] == os.getpid()
+    assert seen["note"]["pid"] == os.getpid()
+    assert "started" in seen["note"]
+    assert jobs_mod.running_pid(job.dir) is None
+    assert not (job.dir / jobs_mod.RUNNING_NOTE).exists()
+
+
+def test_the_note_is_taken_away_when_the_run_fails(tmp_path, monkeypatch):
+    from scriba import jobs as jobs_mod
+
+    job = make_job(audio_file(tmp_path / "memos"))
+
+    def fake_run(*, force):
+        raise RuntimeError("the disk went away")
+
+    monkeypatch.setattr(job, "_run", fake_run)
+    monkeypatch.setattr(pipeline, "model_cache_problem", lambda: None)
+    with pytest.raises(RuntimeError):
+        job.run()
+    assert not (job.dir / jobs_mod.RUNNING_NOTE).exists()
+
+
+def test_a_failed_run_writes_its_reason_and_a_finished_one_clears_it(tmp_path, monkeypatch):
+    job = make_job(audio_file(tmp_path / "memos"))
+    monkeypatch.setattr(pipeline, "model_cache_problem", lambda: None)
+
+    def failing(*, force):
+        raise RuntimeError(f"{pipeline.ERR_NO_TOKEN} the disk went away")
+
+    monkeypatch.setattr(job, "_run", failing)
+    with pytest.raises(RuntimeError):
+        job.run()
+    state = json.loads(job.state_path.read_text())
+    assert state["failed"] == "the disk went away"      # marker stripped, words kept
+
+    monkeypatch.setattr(job, "_run", lambda *, force: "fine")
+    assert job.run() == "fine"
+    assert "failed" not in json.loads(job.state_path.read_text())

@@ -670,6 +670,72 @@ def test_output_present_wins_over_the_missing_intermediates(jobs_dir):
     assert jobs_mod.inventory()[0].state == "done"
 
 
+def test_a_ds_store_alone_is_not_output(jobs_dir):
+    # The Finder writes one into any folder somebody opens. A job whose only
+    # "document" was that used to be listed as ready to read.
+    make_job(jobs_dir, "finder-0010", state={"source": "/audio/nove.m4a"},
+             transcript=True, diarization=True, output=[".DS_Store"])
+    row = jobs_mod.inventory()[0]
+    assert row.state == "transcribed"
+    assert row.has_output is False
+
+
+def test_a_job_being_run_by_a_live_process_is_running(jobs_dir):
+    # This test's own process is as alive as they come.
+    make_job(jobs_dir, "vivo-0011", state={"source": "/audio/dieci.m4a"},
+             extra={jobs_mod.RUNNING_NOTE: json.dumps({"pid": os.getpid()})})
+    row = jobs_mod.inventory()[0]
+    assert row.state == "running"
+    assert jobs_mod.running_pid(row.path) == os.getpid()
+
+
+def test_a_note_left_by_a_dead_process_counts_for_nothing(jobs_dir):
+    # A crash leaves the note behind. The files then say what the job is.
+    dead = 2 ** 22 - 7  # above any pid macOS hands out, so nobody is home
+    make_job(jobs_dir, "morto-0012", state={"source": "/audio/undici.m4a"},
+             transcript=True,
+             extra={jobs_mod.RUNNING_NOTE: json.dumps({"pid": dead})})
+    row = jobs_mod.inventory()[0]
+    assert row.state == "text only"
+    assert jobs_mod.running_pid(row.path) is None
+
+
+def test_a_garbled_running_note_counts_for_nothing(jobs_dir):
+    make_job(jobs_dir, "rotto-0013", state={"source": "/audio/dodici.m4a"},
+             extra={jobs_mod.RUNNING_NOTE: "not json at all"})
+    assert jobs_mod.inventory()[0].state == "nothing"
+
+
+def test_finished_output_still_wins_while_a_rerun_is_in_progress(jobs_dir):
+    # Redoing a finished job from a terminal does not hide the document that is
+    # already there: the old one stays readable until the new one replaces it.
+    make_job(jobs_dir, "rifatto-0014", state={"source": "/audio/tredici.m4a"},
+             output=["tredici.md"],
+             extra={jobs_mod.RUNNING_NOTE: json.dumps({"pid": os.getpid()})})
+    assert jobs_mod.inventory()[0].state == "done"
+
+
+def test_the_reason_a_run_stopped_travels_into_the_listing(jobs_dir):
+    make_job(jobs_dir, "caduto-0017", state={"source": "/audio/z.m4a",
+                                             "failed": "z.m4a has no audio track"})
+    make_job(jobs_dir, "sano-0018", state={"source": "/audio/w.m4a"})
+    rows = by_name(jobs_mod.inventory())
+    assert rows["caduto-0017"].failed == "z.m4a has no audio track"
+    assert rows["sano-0018"].failed == ""
+
+
+def test_prune_leaves_a_running_job_alone(jobs_dir):
+    make_job(jobs_dir, "incorso-0015", state={"source": "/audio/x.m4a"}, wav_bytes=2048,
+             extra={jobs_mod.RUNNING_NOTE: json.dumps({"pid": os.getpid()})})
+    make_job(jobs_dir, "fermo-0016", state={"source": "/audio/y.m4a"}, wav_bytes=2048)
+    rows = jobs_mod.inventory()
+    targets = jobs_mod.prune(rows, audio=True, empty=True, dry_run=True)
+    touched = {path.parts[-2] if path.name == "audio16k.wav" else path.name
+               for path, _ in targets}
+    assert "fermo-0016" in touched
+    assert "incorso-0015" not in touched
+
+
 def test_inventory_reads_the_fields_it_reports(jobs_dir):
     make_job(jobs_dir, "riunione-9f3c", state={
         "source": "/Volumes/Registrazioni/riunione con Otello.m4a",
