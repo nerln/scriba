@@ -14,6 +14,9 @@ HOME = Path.home()
 DATA_DIR = Path(os.environ.get("SCRIBA_HOME", HOME / ".scriba"))
 VOICES_DIR = DATA_DIR / "voices"
 JOBS_DIR = DATA_DIR / "jobs"
+# Where the models are. Set as HF_HOME in scriba/__init__.py, before any library
+# that reads it is imported; this name is for code that wants to look.
+MODELS_DIR = Path(os.environ.get("HF_HOME", DATA_DIR / "models"))
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
 KEYCHAIN_SERVICE = "scriba-hf-token"
@@ -70,6 +73,39 @@ def keychain_set(token: str, service: str = KEYCHAIN_SERVICE) -> None:
          "-s", service, "-w", token],
         check=True, capture_output=True,
     )
+
+
+def model_cache_problem() -> str | None:
+    """Why the model cache cannot be used, or None if it can.
+
+    The cache is where every model this tool loads lives, and on a Mac with a
+    small disk it is often a link to an external drive. When that drive is not
+    plugged in the link points at nothing, and the first model to load fails.
+    How it fails depends on which library gets there first: faster-whisper says
+    "No such file or directory" about a folder nobody asked for, and pyannote
+    says to log in to Hugging Face, which is not the problem and sends a person
+    off to check a token that was fine all along. This runs before any of them
+    and says the one true thing.
+    """
+    root = Path(os.environ.get("HF_HOME") or (HOME / ".cache" / "huggingface"))
+    hub = Path(os.environ.get("HF_HUB_CACHE") or (root / "hub"))
+    if hub.is_dir():
+        return None
+    real = os.path.realpath(root)
+    if Path(real).is_dir():
+        return None                      # the hub folder is just not made yet
+    if not root.is_symlink() and not root.exists():
+        return None                      # a fresh machine: the first download makes it
+    if real.startswith("/Volumes/"):
+        volume = "/".join(real.split("/")[:3])
+        return (f"The model cache is on {volume}, and that disk is not connected. "
+                "Every model scriba loads lives there, so nothing can run until it "
+                "is: plug it in and try again. If the models should live on this "
+                "Mac instead, set HF_HOME to a folder here and they will be "
+                "downloaded once, about 6 GB.")
+    return (f"The model cache at {root} does not exist and is not a folder that "
+            "can be created. Set HF_HOME to a folder that is, or remove the link "
+            "and let scriba make one.")
 
 
 def hf_token() -> str | None:
@@ -258,3 +294,7 @@ class Settings:
 def ensure_dirs() -> None:
     for d in (DATA_DIR, VOICES_DIR, JOBS_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    # Only when it is ours. An HF_HOME somebody else set may point at a drive
+    # that is not here, and making a folder in its place would hide that.
+    if MODELS_DIR == DATA_DIR / "models":
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)

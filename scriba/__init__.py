@@ -16,6 +16,22 @@ import os as _os
 # the fix has to be one that cannot drift.
 _os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
 
+# The models live with the tool, not in the shared Hugging Face cache.
+#
+# The shared cache is one folder for every tool on the machine, and on a Mac with
+# a small disk it is a link to an external drive. Unplug the drive and every model
+# scriba loads is gone, and the failure is reported by whichever library reached
+# the cache first: faster-whisper complains about a folder nobody asked for, and
+# pyannote asks for a login to Hugging Face, which sends a person to check a
+# token that was fine all along. So scriba keeps its own copy, under its own data
+# folder, on this disk. About six gigabytes once, and it works with the drive at
+# home. Set HF_HOME yourself and this steps aside; the libraries read it at
+# import, which is why it has to happen here and not in the module that loads
+# the models.
+if "HF_HOME" not in _os.environ:
+    _os.environ["HF_HOME"] = _os.path.join(
+        _os.environ.get("SCRIBA_HOME", _os.path.expanduser("~/.scriba")), "models")
+
 
 def _quieten_torchcodec_warning() -> None:
     """Drop pyannote's twenty-line complaint that torchcodec cannot decode audio.

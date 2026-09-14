@@ -165,6 +165,29 @@ class Diarization:
         return sorted(turns, key=lambda t: t.duration, reverse=True)[:n]
 
 
+def _explain_download_failure(exc: Exception, token: str | None) -> str:
+    """One sentence about why the diarization model could not be fetched."""
+    text = str(exc)
+    where = ("Set a new one in Scriba > Settings > pyannote token, or with "
+             "`scriba token hf_...`; it is created at huggingface.co/settings/tokens.")
+    if token is None:
+        return ("No Hugging Face token is set, and the diarization model is gated "
+                "behind one. " + where)
+    if "401" in text or "Invalid user token" in text:
+        return ("Hugging Face rejected the token in the Keychain: it is no longer "
+                "valid, which is what happens when a token is revoked or regenerated "
+                "on the website. " + where)
+    if "403" in text:
+        return (f"The token is valid but this account has not accepted the "
+                f"conditions of {DIARIZATION_MODEL}. Open https://hf.co/{DIARIZATION_MODEL} "
+                "with the account the token belongs to, accept them, and try again.")
+    if "No such file or directory" in text or "Name or service not known" in text \
+            or "Max retries" in text:
+        return ("The diarization model is not on this Mac and could not be "
+                "downloaded: " + text.strip().splitlines()[0][:160])
+    return f"Could not load the diarization model: {text.strip().splitlines()[0][:200]}"
+
+
 def run(
     wav: Path,
     *,
@@ -182,9 +205,17 @@ def run(
     # The keyword changed name between pyannote 3 and 4. Try the current one, fall
     # back to the old one, so the same code runs against either installed version.
     try:
-        pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=hf_token)
-    except TypeError:
-        pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, use_auth_token=hf_token)
+        try:
+            pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=hf_token)
+        except TypeError:
+            pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, use_auth_token=hf_token)
+    except Exception as exc:
+        # pyannote answers a rejected token with "Please log in", and a person
+        # who has a token in the Keychain reads that as scriba having lost it.
+        # The Hub distinguishes the two cases and so should this: 401 is a token
+        # the Hub does not recognise, revoked or regenerated; 403 is a token it
+        # knows whose owner never accepted the model's conditions.
+        raise RuntimeError(_explain_download_failure(exc, hf_token)) from exc
 
     if pipeline is None:
         raise RuntimeError(

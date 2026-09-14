@@ -21,7 +21,7 @@ from typing import Any, Callable
 import numpy as np
 
 from . import asr, audio, diarize, export, lang, naming
-from .config import JOBS_DIR, Settings, ensure_dirs, hf_token, write_atomic
+from .config import JOBS_DIR, Settings, ensure_dirs, hf_token, model_cache_problem, write_atomic
 from .voices import VoiceRegistry
 
 Reporter = Callable[[str], None]
@@ -401,6 +401,11 @@ class Job:
 
     # ------------------------------------------------------------------- run
     def run(self, *, force: str | None = None) -> JobResult:
+        # Before the audio is even converted. Converting takes seconds and the
+        # model load that follows is where a missing disk shows up, worded by
+        # whichever library got there first.
+        if problem := model_cache_problem():
+            raise RuntimeError(problem)
         f_all = force == "all"
         self._drop_stale_cache()
         self.prepare_audio(force=f_all)
