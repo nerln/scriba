@@ -80,6 +80,22 @@ struct QueueTests {
         #expect(q.estimate == "60 min of audio, up to about 30 min of work.")
         q.items = [Self.item("a.m4a")]
         #expect(q.estimate == "Takes up to half the length of the recordings.")
+        // A few seconds of audio is not "0 min of audio".
+        q.items = [Self.item("a.m4a", minutes: 0.1), Self.item("b.m4a", minutes: 0.1)]
+        #expect(q.estimate == "12 s of audio, up to about 1 min of work.")
+    }
+
+    @Test("the sidebar draws the running row first and the problems last")
+    func shownOrder() {
+        var q = Queue()
+        q.items = [Self.item("bad1.m4a", .failed("x")), Self.item("b.m4a"),
+                   Self.item("bad2.m4a", .failed("y")), Self.item("c.m4a"),
+                   Self.item("a.m4a", .running)]
+        #expect(q.shown.map { $0.url.lastPathComponent }
+                == ["a.m4a", "b.m4a", "c.m4a", "bad1.m4a", "bad2.m4a"])
+        // The order things run in is not touched by the order they are drawn in.
+        #expect(q.nextToRun?.url.lastPathComponent == "b.m4a")
+        #expect(q.items.count == q.shown.count)
     }
 
     @Test("the progress panel promises a continuation only when there is one")

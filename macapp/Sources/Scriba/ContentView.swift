@@ -167,7 +167,7 @@ struct ContentView: View {
             }
             if !queue.isEmpty {
                 Section(queue.title) {
-                    ForEach(queue.items) { item in
+                    ForEach(queue.shown) { item in
                         QueueRow(item: item).tag(Selection.pending(item.id))
                             .swipeActions(edge: .trailing) {
                                 // Swiping a queued recording takes it out of the
@@ -181,7 +181,8 @@ struct ContentView: View {
                     }
                     .onDelete { offsets in
                         // Never silently drop the one that is running.
-                        for item in offsets.map({ queue.items[$0] }) { dismiss(item) }
+                        let shown = queue.shown
+                        for item in offsets.map({ shown[$0] }) { dismiss(item) }
                     }
                 }
             }
@@ -378,6 +379,12 @@ struct ContentView: View {
 
     private func adoptInbox() {
         let known = Set(store.jobs.map { canonicalPath($0.sourcePath) })
+        // What takes a waiting row out is a job that finished, or one another
+        // run is on right now. A stopped run leaves a folder too, and counting
+        // it made Stop throw the recording out of the queue at the next look
+        // at the inbox, into "Not finished".
+        let settled = Set(store.jobs.filter { $0.isFinished || $0.isRunningElsewhere }
+                                    .map { canonicalPath($0.sourcePath) })
         let folder = Inbox.folder
         Task.detached(priority: .utility) {
             let present = Inbox.contents(in: folder)
@@ -389,7 +396,7 @@ struct ContentView: View {
                 dismissed = Dismissed.load()
                 // Rows the engine reached by another road are no longer waiting
                 // on this window: the job list has them now, running or done.
-                let gone = queue.reconcileInbox(known: known)
+                let gone = queue.reconcileInbox(known: settled)
                 if case .pending(let id) = selection, gone.contains(id) { selection = nil }
                 enqueue(Inbox.waiting(among: present, known: known, dismissed: dismissed),
                         select: false)
@@ -536,11 +543,13 @@ struct ContentView: View {
             // spelling of the path, not the Finder's, is what finds it.
             let job = store.jobs.first { canonicalPath($0.sourcePath) == path }
             queue.remove(item.id)
-            if let job {
-                selection = .job(job.jobDir)
-            } else if case .pending(let id) = selection, id == item.id {
-                selection = nil
-            }
+            // Only somebody who was watching this recording is taken to its
+            // transcript. During a batch every finished file used to pull the
+            // selection to itself, out from under whatever was being read.
+            var watching = selection == nil
+            if case .pending(let id) = selection, id == item.id { watching = true }
+            guard watching else { return }
+            selection = job.map { .job($0.jobDir) }
         }
     }
 
@@ -1300,6 +1309,17 @@ struct JobPanel: View {
     let loading: Bool
 
     var body: some View {
+        // In a scroll view for the same reason as ProgressPanel: the sentence
+        // below has its height fixed to its contents.
+        ScrollView {
+            content
+                .padding(28)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(job.source).font(.title2).bold()
             HStack(spacing: 14) {
@@ -1330,11 +1350,7 @@ struct JobPanel: View {
                 Label("Show the files", systemImage: "folder")
             }
             .disabled(!job.hasOutput)
-
-            Spacer()
         }
-        .padding(28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
@@ -1395,6 +1411,23 @@ struct ProgressPanel: View {
                                   .aligning, .diarizing, .identifying, .exporting]
 
     var body: some View {
+        // Inside a scroll view, like every other panel in the detail pane. A
+        // text whose height is fixed to its contents, outside one, answers the
+        // split view's narrow probes with the height it would need there, which
+        // is thousands of points. The window's content was then laid out taller
+        // than the window: the sidebar slid up out of sight, the strip under it
+        // went with it, and this pane was blank for the whole run. It happened
+        // on the Transcribe button of a single recording with others waiting,
+        // the one start that shows the long sentence about them.
+        ScrollView {
+            content
+                .padding(28)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(live.phase.rawValue).font(.title2).bold()
@@ -1448,9 +1481,6 @@ struct ProgressPanel: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2).textSelection(.enabled)
             }
-            Spacer()
         }
-        .padding(28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }

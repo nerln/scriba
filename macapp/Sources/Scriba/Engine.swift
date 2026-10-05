@@ -19,8 +19,13 @@ final class RunState: ObservableObject {
     @Published var lastLine = ""
     @Published var progress: Double?
 
+    /// A new run, or none. The bar and the last line go with the phase: kept,
+    /// the second recording of a batch opened at 100% under "Preparing the
+    /// audio", with the first one's final line under it.
     func reset(to phase: Phase) {
         self.phase = phase
+        progress = nil
+        lastLine = ""
     }
 }
 

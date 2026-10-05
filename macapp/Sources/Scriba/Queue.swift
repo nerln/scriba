@@ -22,6 +22,18 @@ struct Queue: Equatable {
     var failed: [QueueItem] { items.filter { $0.state.isFailed } }
     var nextToRun: QueueItem? { waiting.first }
 
+    /// The rows in the order the sidebar draws them: the running one, then
+    /// what waits in the order it will run, then the ones with a problem.
+    ///
+    /// The list used to follow the order things were added. A recording
+    /// started from the bottom of a long queue ran down there, under eight
+    /// rows of files that were never on this Mac, and the one row that was
+    /// moving could not be seen without scrolling.
+    var shown: [QueueItem] {
+        items.filter { $0.state == .running } + waiting
+            + items.filter { $0.state == .finished } + failed
+    }
+
     /// The files in it, spelled the way the engine spells them.
     var paths: Set<String> { Set(items.map(\.path)) }
 
@@ -67,9 +79,12 @@ struct Queue: Equatable {
         guard !waiting.isEmpty else { return "" }
         let audio = waiting.compactMap(\.minutes).reduce(0, +)
         guard audio > 0 else { return "Takes up to half the length of the recordings." }
-        let minutes = Int(audio.rounded())
         let work = max(1, Int((audio * Self.workShare).rounded()))
-        return "\(minutes) min of audio, up to about \(work) min of work."
+        // Under a minute in seconds. Rounded to minutes, a batch of short
+        // memos read "0 min of audio, up to about 1 min of work".
+        let length = audio < 0.5 ? "\(max(1, Int((audio * 60).rounded()))) s"
+                                 : "\(Int(audio.rounded())) min"
+        return "\(length) of audio, up to about \(work) min of work."
     }
 
     /// What the progress panel says under the running recording.
