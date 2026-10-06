@@ -167,6 +167,14 @@ read as a person somebody knows, and confident answers get built on top of it.
 Five other formats come out of the same run for the tools that want them: plain
 Markdown, text, SRT, VTT and JSON.
 
+The words scriba writes around the text follow the language of the recording. An
+Italian one has `## Panoramica`, `- **Partecipanti**:` and `Voce 3 (non identificata)`
+where the document above has Overview, Participants and Voice 3 (unidentified);
+Spanish does the same, and any other language gets English. Only what scriba adds
+changes. The transcript is as it was said, and the file names, the JSON keys, the
+SRT and VTT structure and the language code in the header are the same in every
+language, because other programs read them.
+
 ## Install
 
 macOS with Apple Silicon, Python 3.10 or newer, `ffmpeg`, and a Hugging Face account
@@ -285,6 +293,28 @@ back. Transcripts and voice prints cost CPU to make and are never touched by it.
 
 Every stage is cached under `~/.scriba/jobs/<name>/`, so redoing just the names
 re-transcribes nothing. Pass `--force asr|diar|lang|all` to rerun the stage you want.
+The number of people a run was given is remembered by the job, so a recording put
+back in the queue is heard with the same count, and `scriba name` rewrites the
+documents from what is cached without diarizing again.
+
+Transcription runs in a child process of its own. The Metal memory a model takes is
+not all given back when the model is deleted, so the diarizer used to start with
+whatever transcription had left, and on a 16 GB Mac a long recording ran out of it
+there. The child ends and the system takes everything back. `SCRIBA_IN_PROCESS=1`
+runs it in the calling process instead, which is what a debugger and the tests want.
+
+A run leaves `running.json` in its job folder with its process id and the moment that
+process started. A Stop removes it, and a pid that macOS later gives to another process
+is told from the run by that moment, so a leftover note never blocks the job.
+
+A run started from a terminal keeps the Mac from going to sleep while it works. The
+first recording that starts holds `/usr/bin/caffeinate -i -w <pid>`, one per process,
+which lets go by itself when scriba ends, by a clean exit or a kill. It refuses idle
+sleep only: closing the lid and the Sleep menu still work. `scriba watch` and
+`scriba memos` hold it from the first recording until they are stopped. The hold is in
+the engine, so a run the app starts has it too, and a second assertion taken by the
+app beside it changes nothing. `SCRIBA_KEEP_AWAKE=0` turns it off, for a laptop that
+should sleep on battery and carry on when it wakes.
 
 ### Finding your own voice
 
@@ -392,26 +422,64 @@ person.
 On first run, open Settings. The app needs the Python of the environment where you
 installed `scriba`, and both fields say whether what you typed is there. The second
 field, the package folder, only matters when you are running from a clone; a pip
-install can leave it alone.
+install can leave it alone. The pyannote token can be saved there too. Settings hands
+it to `/usr/bin/security` on its standard input, so it is the same Keychain item
+`scriba token` makes, the engine reads it without a dialog in the middle of a run, and
+the token is in no command line and no environment. It has to be `hf_` and then
+letters and digits, which is what Hugging Face issues; anything else is refused with a
+message instead of being stored as a different token.
 
 The queue is the list at the top of the sidebar. Its header counts what is
 waiting, says when one is running and how many did not finish; the button under
 the sidebar starts everything with an estimate of the time next to it, and the
-Transcribe button on one recording starts that one alone. Language and the number
-of people belong to each recording, with a shortcut to give the same settings to
-every one still waiting. The list survives a quit: what was waiting is waiting
-again at the next launch.
+Transcribe button on one recording starts that one alone. While one runs, the same
+button on another puts it next, and the queue stops behind it: only Transcribe all
+carries on through the list. Language and the number of people belong to each
+recording, with a shortcut to give the same settings to every one still waiting.
+A recording made in the app is queued with the language chosen on the welcome
+screen, beside the switch for live text; left on automatic, the live text listens for
+the language of the Mac and says that it is guessing. A file that is small, or held by
+a cloud service, is queued with a note and not refused: the engine opens it and says
+if it is empty.
+The list survives a quit: what was waiting is waiting again at the next launch.
 
-A run can be stopped from the strip under the sidebar or from the Transcribe menu,
-and quitting the app stops the engine with it. The keys are the ones a Mac
-application puts them on: `cmd O` to add recordings, `cmd T` to transcribe all,
-`cmd .` to stop, `cmd R` to re-read the list.
+A run can be stopped from the strip under the sidebar or from the Transcribe menu.
+Quitting the app stops the engine with it, and closes a recording in progress and
+puts it in the queue. A second Stop, or a quit, while a stop is still finishing waits
+for it, so the file is closed and queued before the app goes. Closing the window
+stops nothing: the queue, the run and the recorder belong to the app, and the next
+window shows them as they were. There is only ever one window, and the Dock icon or
+Window > Show Scriba brings it back. The keys are the ones a Mac application puts
+them on: `cmd O` to add recordings, `cmd T` to transcribe all, `cmd .` to stop, `cmd R`
+to re-read the list.
 
 The window stays usable while a transcription runs. That took saying twice, because
 the first version handed the whole detail pane to the progress display, and a run
 takes up to half the length of the recording. The strip says what is happening
 from wherever you are in the app; the pane is yours. A run started from a
 terminal shows in the list as running, not as a failure, for as long as it lasts.
+
+While Scriba records or transcribes it asks macOS not to put the Mac to sleep when it
+is idle, and lets go the moment the work ends, whichever way it ends (finished,
+failed, stopped, or the app quit). It does not keep a closed lid awake: closing the lid of a
+laptop puts it to sleep whatever an application asks, unless it is on power with an
+external display. For a long run, leave the lid open or use that setup. The screen can
+still turn off.
+
+When Transcribe all finishes, or a single recording finishes while Scriba is in the
+background, Scriba shows one notification with numbers only, such as "3
+transcribed, 1 did not go through". It never contains a file name, a person's name or
+anything from a recording, because notifications appear on the lock screen. The first
+time you start a run, macOS asks whether Scriba may notify you; if you say no, nothing
+else changes. When recordings were put next and one of them fails, the failure is held
+until the last of them has run, and told once with the others, as Transcribe all does.
+
+If the microphone changes while you record (AirPods connect, a USB microphone is
+plugged in or out), Scriba carries on into the same file with the new input; a fraction
+of a second around the switch is lost. If it cannot restart the input, it stops the
+recording, puts what it has in the queue as it would after Stop, and says why at the
+top of the window. Live text follows the new microphone if it can, and stops alone if
+it cannot.
 
 ## Speed, and why it is what it is
 
@@ -528,6 +596,8 @@ scriba/
   naming.py     the "who is who" briefing: textual cues plus registry matches
   export.py     output formats, the readable document first
   pipeline.py   the orchestrator, cached per stage
+  stage.py      runs a model stage in a child process and hands back its result
+  awake.py      keeps the Mac from idle sleep while a run works
   watch.py      watched folder
 macapp/         the SwiftUI app
 tools/          stylecheck.py, make-demo.py, and the writing rules this repo is held to
