@@ -106,6 +106,32 @@ struct QueueTests {
         #expect(Queue.remainingText(1, continues: false)?.contains("Transcribe all") == true)
     }
 
+    @Test("a recording put next is named, and the others are said to wait for Transcribe all")
+    func remainingTextWithAsked() {
+        let one = Queue.remainingText(3, continues: false, asked: ["b.m4a"])
+        #expect(one?.hasPrefix("b.m4a goes next, and then it stops.") == true)
+        #expect(one?.contains("The other 2 do not start on their own") == true)
+        #expect(one?.contains("Transcribe all") == true)
+        #expect(Queue.remainingText(2, continues: false, asked: ["b.m4a"])?
+                    .contains("The other one does not start on its own") == true)
+        #expect(Queue.remainingText(1, continues: false, asked: ["b.m4a"])
+                == "b.m4a goes next, and then it stops.")
+        #expect(Queue.remainingText(2, continues: false, asked: ["b.m4a", "c.m4a"])?
+                    .hasPrefix("2 go next, in the order they were asked for, and then it stops.") == true)
+        // Transcribe all swallows the distinction: everything follows.
+        #expect(Queue.remainingText(3, continues: true, asked: ["b.m4a"]) == "3 more after this one")
+    }
+
+    @Test("a batch says what failed once, and says nothing when nothing did")
+    func batchSummary() {
+        #expect(Queue.batchSummary([]) == nil)
+        #expect(Queue.batchSummary([(name: "a.m4a", reason: "no audio track")])
+                == "1 recording did not go through:\na.m4a: no audio track")
+        let two = Queue.batchSummary([(name: "a.m4a", reason: "no audio track"),
+                                      (name: "b.m4a", reason: "out of memory")])
+        #expect(two == "2 recordings did not go through:\na.m4a: no audio track\nb.m4a: out of memory")
+    }
+
     @Test("the Transcribe button is live only when pressing it does something")
     func canStart() {
         #expect(Queue.canStart(.waiting, engineBusy: false))
@@ -182,33 +208,54 @@ struct QueueTests {
         #expect(q.items.map { $0.url.lastPathComponent } == ["b.m4a", "c.m4a", "d.m4a"])
     }
 
-    // MARK: files that are not really there
+    // MARK: files that may not be what they seem
 
-    @Test("a file too small to hold audio is refused at the door, with the size in the reason")
-    func placeholderIsFailedOnAdd() throws {
+    @Test("a small file is annotated with its size and still waits: the engine decides")
+    func smallFileIsNotRefused() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("scriba-queue-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let stub = dir.appendingPathComponent("stub.m4a")
-        FileManager.default.createFile(atPath: stub.path, contents: Data(count: 9 * 1024))
+        let note = dir.appendingPathComponent("note.m4a")
+        FileManager.default.createFile(atPath: note.path, contents: Data(count: 9 * 1024))
         let real = dir.appendingPathComponent("real.m4a")
         FileManager.default.createFile(atPath: real.path, contents: Data(count: 200 * 1024))
 
         var q = Queue()
-        q.add([(url: stub, collection: ""), (url: real, collection: "")])
-        guard case .failed(let why) = q.items[0].state else {
-            Issue.record("the stub should have been marked failed"); return
-        }
-        #expect(why.contains("9 KB"))
-        #expect(why.contains("no audio behind it"))
+        q.add([(url: note, collection: ""), (url: real, collection: "")])
+        // A ten-second voice note at a low bitrate is this size. Refusing it with
+        // a reason that was a guess meant Transcribe all never transcribed it.
+        #expect(q.items[0].state == .waiting)
+        #expect(q.items[0].note?.text.contains("9 KB") == true)
+        #expect(q.items[0].note?.isWarning == false)
         #expect(q.items[1].state == .waiting)
-        #expect(q.startTitle == "Transcribe this one")
+        #expect(q.items[1].note == nil)
+        #expect(q.startTitle == "Transcribe all 2")
     }
 
-    @Test("a file that is not there is nobody's problem to describe")
-    func missingFileHasNoProblem() {
-        #expect(Queue.problem(with: Self.url("nowhere.m4a")) == nil)
+    @Test("a file that reports a size and holds no data is annotated as cloud-held, not failed")
+    func hollowFileIsNotRefused() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("scriba-queue-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // A sparse file: five megabytes long, no blocks behind it.
+        let hollow = dir.appendingPathComponent("hollow.m4a")
+        FileManager.default.createFile(atPath: hollow.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: hollow)
+        try handle.truncate(atOffset: 5 * 1024 * 1024)
+        try handle.close()
+
+        var q = Queue()
+        q.add([(url: hollow, collection: "")])
+        #expect(q.items[0].state == .waiting)
+        #expect(q.items[0].note?.text.contains("cloud service") == true)
+        #expect(q.nextToRun?.url == hollow)
+    }
+
+    @Test("a file that is not there has nothing to be annotated with")
+    func missingFileHasNoNote() {
+        #expect(Queue.note(for: Self.url("nowhere.m4a")) == nil)
     }
 
     // MARK: surviving a quit
@@ -297,6 +344,59 @@ struct ListTests {
         #expect(Self.job("/r/a.m4a", state: "done").isFinished)
     }
 
+    @Test("a read that started before an archive does not undo it")
+    func readBeforeAChangeIsDropped() {
+        var gate = ReadGate()
+        let early = gate.token
+        gate.commandStarted()
+        // It lands while the engine is still being told: thrown away, and the
+        // command, not the read, is what asks for the next one.
+        #expect(gate.landed(early) == .discard(readAgain: false))
+        #expect(gate.commandEnded(succeeded: true) == true)
+        let fresh = gate.token
+        #expect(gate.landed(fresh) == .apply)
+    }
+
+    @Test("a read that lands after the command has answered is thrown away and redone at once")
+    func readOverlappingACommand() {
+        var gate = ReadGate()
+        gate.commandStarted()
+        let during = gate.token
+        #expect(gate.commandEnded(succeeded: true) == false)
+        #expect(gate.landed(during) == .discard(readAgain: true))
+        #expect(gate.landed(gate.token) == .apply)
+    }
+
+    @Test("with no change in between, a read lands")
+    func plainReadLands() {
+        var gate = ReadGate()
+        let token = gate.token
+        #expect(gate.landed(token) == .apply)
+        #expect(gate.landed(gate.token) == .apply)
+    }
+
+    @Test("a read begun and landed while a command runs is not trusted either")
+    func readInsideACommand() {
+        var gate = ReadGate()
+        gate.commandStarted()
+        let inside = gate.token
+        #expect(gate.landed(inside) == .discard(readAgain: false))
+        let owed = gate.commandEnded(succeeded: true)
+        #expect(owed)
+        #expect(gate.landed(gate.token) == .apply)
+    }
+
+    @Test("a failed command owes a read, and two overlapping ones ask for it once, at the end")
+    func failedAndOverlapping() {
+        var gate = ReadGate()
+        gate.commandStarted()
+        gate.commandStarted()
+        let first = gate.commandEnded(succeeded: false)
+        let last = gate.commandEnded(succeeded: true)
+        #expect(!first)
+        #expect(last)
+    }
+
     @Test("the one-line failure is the reason, not the exit code")
     func failureSummary() {
         let text = "Exit code 1.\n\n──── a.m4a ────\n  a.m4a is not an audio or video file.\n"
@@ -326,6 +426,17 @@ struct InboxTests {
                                     dismissed: [canonicalPath("/in/b.m4a")])
         #expect(offered.map { $0.url.lastPathComponent } == ["c.m4a"])
         #expect(offered.allSatisfy { $0.collection == Inbox.collection })
+    }
+
+    @Test("a recording is in the inbox when its path is under the folder, however spelled")
+    func holds() {
+        let folder = URL(fileURLWithPath: "/scriba-home/inbox")
+        #expect(Inbox.holds("/scriba-home/inbox/a.m4a", in: folder))
+        #expect(Inbox.holds("/scriba-home/inbox/./sub/a.m4a", in: folder))
+        #expect(!Inbox.holds("/scriba-home/inbox-old/a.m4a", in: folder))
+        #expect(!Inbox.holds("/scriba-home/recordings/a.m4a", in: folder))
+        #expect(!Inbox.holds("/scriba-home/inbox", in: folder))
+        #expect(!Inbox.holds("", in: folder))
     }
 
     @Test("a missing inbox folder is an empty inbox, not an error")

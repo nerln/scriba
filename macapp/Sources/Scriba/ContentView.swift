@@ -11,30 +11,29 @@ import UniformTypeIdentifiers
 /// because transcription runs for as long as the recording lasts and is not something
 /// anybody should begin by accident.
 struct ContentView: View {
-    @StateObject private var engine = Engine()
-    @StateObject private var store = JobsStore()
-    @StateObject private var recorder = Recorder()
+    /// What has to outlive the window: the engine, the queue, the job list and
+    /// the recorder. See AppModel. The three objects are observed here as well,
+    /// because observing the model alone does not notice them change.
+    @ObservedObject var model: AppModel
+    @ObservedObject private var engine: Engine
+    @ObservedObject private var store: JobsStore
+    @ObservedObject private var recorder: Recorder
 
-    @State private var queue = Queue()
     @State private var selection: Selection?
-    /// The language for the microphone. A recording made here carries it into
-    /// the queue; a dropped file starts on automatic and has its own.
-    @State private var language = "auto"
     @State private var enrollOnSave = true
     @State private var isTargeted = false
-    @State private var runningAll = false
     @State private var filter = ""
     @State private var showArchived = false
     @State private var deleting: JobSummary?
-    @State private var scanning: String?
-    /// Inbox recordings somebody swiped out of the queue. Kept across launches,
-    /// or the next look at the inbox would offer them straight back.
-    @State private var dismissed: Set<String> = Dismissed.load()
 
-    /// Where the queue is written between launches. It lived in memory only, so
-    /// quitting with ten recordings waiting meant finding and dropping the ten
-    /// again, and a crash mid-batch lost the list without a word.
-    static let savedQueueKey = "queuedRecordings"
+    init(model: AppModel) {
+        self.model = model
+        _engine = ObservedObject(wrappedValue: model.engine)
+        _store = ObservedObject(wrappedValue: model.store)
+        _recorder = ObservedObject(wrappedValue: model.recorder)
+    }
+
+    private var queue: Queue { model.queue }
 
     enum Selection: Hashable {
         case recording
@@ -54,65 +53,78 @@ struct ContentView: View {
             detail
         }
         .frame(minWidth: 900, minHeight: 560)
-        .onAppear {
-            restoreQueue()
-            lookAround()
-            AppDelegate.onQuit = { [weak engine, weak recorder] in
-                engine?.terminateChild()
-                // Quitting mid-recording has to close the file. The WAV header
-                // carries the length, and it is written when the file is closed:
-                // a recording left open is one every tool reads as zero seconds.
-                if let recorder, recorder.isRecording {
-                    let group = DispatchGroup()
-                    group.enter()
-                    Task { @MainActor in
-                        await recorder.stop()
-                        group.leave()
-                    }
-                    _ = group.wait(timeout: .now() + 3)
-                }
-            }
-        }
+        .onAppear { model.lookAround() }
         // Coming back to the window is the moment to look again. The same engine
         // is usable from a terminal, on purpose, so a transcription can appear
         // while this window is open and it should not take a relaunch to see it.
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification)) { _ in
-            if !engine.isRunning { lookAround() }
+            if !engine.isRunning { model.lookAround() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribaRefresh)) { _ in
-            lookAround()
-        }
-        .onChange(of: queue.saved) { _, saved in
-            saveQueue(saved)
+            model.lookAround()
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribaStart)) { _ in
             // Mid-run it means: let the waiting ones follow.
-            startAll()
+            model.startAll()
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribaStop)) { _ in
-            if engine.isRunning { stopEverything() }
+            if engine.isRunning { model.stopEverything() }
+        }
+        // A row that leaves the queue under a selection pointing at it, whether
+        // swiped away, reconciled with a job or finished, leaves the selection
+        // pointing at nothing.
+        .onChange(of: queue.items.map(\.id)) { _, ids in
+            if case .pending(let id) = selection, !ids.contains(id) { selection = nil }
+        }
+        .onReceive(model.selectFirst) { _ in
+            if selection == nil, let first = queue.items.first {
+                selection = .pending(first.id)
+            }
+        }
+        .onReceive(model.recordingEnded) { id in
+            // The recording stopped by itself (the microphone went away) while
+            // its pane was open. Leave a pane that has nothing left to show, for
+            // the row the recording became.
+            guard case .recording = selection else { return }
+            selection = id.map { .pending($0) }
+        }
+        .onReceive(model.followed) { done in
+            // Only somebody who was watching this recording is taken to its
+            // transcript. During a batch every finished file used to pull the
+            // selection to itself, out from under whatever was being read.
+            var watching = selection == nil
+            if case .pending(let id) = selection, id == done.itemID { watching = true }
+            guard watching else { return }
+            selection = done.jobDir.map { .job($0) }
         }
         .safeAreaInset(edge: .top) {
             // A wrong interpreter path used to look exactly like a clean install
             // with nothing in it: the state reader fails quietly and the sidebar
             // reads "Nothing yet". Say it once, at the top, before anyone presses
             // a button and waits for the failure.
-            if !Engine.isConfigured {
-                HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("No Python interpreter at \(Engine.pythonPath)").bold()
-                        Text("Open Settings and point it at the environment where "
-                             + "scriba is installed. Nothing will run until then.")
-                            .font(.caption).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                if !Engine.isConfigured {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("No Python interpreter at \(Engine.pythonPath)").bold()
+                            Text("Open Settings and point it at the environment where "
+                                 + "scriba is installed. Nothing will run until then.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        SettingsLink { Text("Open Settings") }
                     }
-                    Spacer()
-                    SettingsLink { Text("Open Settings") }
+                    .padding(12)
+                    .background(.regularMaterial)
                 }
-                .padding(12)
-                .background(.regularMaterial)
+                // What the microphone had to say. Record that does nothing, and a
+                // recording that was too short to keep, both said nothing at all.
+                if let notice = model.notice {
+                    NoticeBanner(text: notice) { model.notice = nil }
+                }
             }
         }
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
@@ -127,8 +139,8 @@ struct ContentView: View {
             }
         }
         .alert("Something went wrong",
-               isPresented: .constant(engine.errorText != nil),
-               presenting: engine.errorText) { _ in
+               isPresented: .constant(model.alertText != nil),
+               presenting: model.alertText) { _ in
             Button("Close") { engine.errorText = nil }
         } message: { Text($0) }
         .onReceive(NotificationCenter.default.publisher(for: .scribaRecord)) { _ in
@@ -174,7 +186,7 @@ struct ContentView: View {
                                 // list and touches nothing on disk: the file is
                                 // still wherever it was.
                                 Button(role: .destructive) {
-                                    dismiss(item)
+                                    model.dismiss(item)
                                 } label: { Label("Remove", systemImage: "xmark") }
                                 .disabled(item.state == .running)
                             }
@@ -182,7 +194,7 @@ struct ContentView: View {
                     .onDelete { offsets in
                         // Never silently drop the one that is running.
                         let shown = queue.shown
-                        for item in offsets.map({ shown[$0] }) { dismiss(item) }
+                        for item in offsets.map({ shown[$0] }) { model.dismiss(item) }
                     }
                 }
             }
@@ -239,11 +251,11 @@ struct ContentView: View {
                 RunningStrip(live: engine.live,
                              name: running.url.lastPathComponent,
                              remaining: queue.waiting.count,
-                             onShow: showRunning, onStop: stopEverything)
+                             onShow: showRunning, onStop: model.stopEverything)
             } else if let title = queue.startTitle {
                 VStack(spacing: 8) {
                     Divider()
-                    Button(action: startAll) {
+                    Button(action: model.startAll) {
                         Label(title, systemImage: "play.fill")
                             .frame(maxWidth: .infinity)
                     }
@@ -345,92 +357,12 @@ struct ContentView: View {
         }
     }
 
-    /// Read the length once, off the main actor, and remember it on the item.
-    private func measure(_ id: UUID, _ url: URL) {
-        Task.detached(priority: .utility) {
-            let asset = AVURLAsset(url: url)
-            guard let duration = try? await asset.load(.duration) else { return }
-            let seconds = CMTimeGetSeconds(duration)
-            guard seconds.isFinite, seconds > 0 else { return }
-            await MainActor.run {
-                if let i = queue.index(of: id) { queue.items[i].minutes = seconds / 60 }
-            }
-        }
-    }
-
     /// A binding into one row of the queue, for the panel that edits it.
     private func binding(for id: UUID) -> Binding<QueueItem>? {
         guard queue.index(of: id) != nil else { return nil }
         return Binding(
             get: { queue.item(id) ?? QueueItem(url: URL(fileURLWithPath: "/")) },
-            set: { new in if let i = queue.index(of: id) { queue.items[i] = new } })
-    }
-
-    // MARK: - looking around
-
-    /// Re-read the list, then look in the inbox for recordings nobody has
-    /// dealt with and put them in the queue, as waiting. Nothing starts.
-    private func lookAround() {
-        Task {
-            await store.reloadAndWait()
-            adoptInbox()
-        }
-    }
-
-    private func adoptInbox() {
-        let known = Set(store.jobs.map { canonicalPath($0.sourcePath) })
-        // What takes a waiting row out is a job that finished, or one another
-        // run is on right now. A stopped run leaves a folder too, and counting
-        // it made Stop throw the recording out of the queue at the next look
-        // at the inbox, into "Not finished".
-        let settled = Set(store.jobs.filter { $0.isFinished || $0.isRunningElsewhere }
-                                    .map { canonicalPath($0.sourcePath) })
-        let folder = Inbox.folder
-        Task.detached(priority: .utility) {
-            let present = Inbox.contents(in: folder)
-            await MainActor.run {
-                // A file gone from the inbox has nothing left to be dismissed
-                // from; forgetting it keeps the list short and lets a recording
-                // copied in a second time be offered a second time.
-                Dismissed.prune(keeping: Set(present.map { canonicalPath($0.url.path) }))
-                dismissed = Dismissed.load()
-                // Rows the engine reached by another road are no longer waiting
-                // on this window: the job list has them now, running or done.
-                let gone = queue.reconcileInbox(known: settled)
-                if case .pending(let id) = selection, gone.contains(id) { selection = nil }
-                enqueue(Inbox.waiting(among: present, known: known, dismissed: dismissed),
-                        select: false)
-            }
-        }
-    }
-
-    /// Take a row out of the queue. An inbox recording is also remembered as
-    /// dismissed, or it would be back on the next look at the inbox.
-    private func dismiss(_ item: QueueItem) {
-        guard item.state != .running else { return }
-        queue.remove(item.id)
-        if item.collection == Inbox.collection {
-            Dismissed.add(item.path)
-            dismissed.insert(item.path)
-        }
-        if case .pending(let id) = selection, id == item.id { selection = nil }
-    }
-
-    // MARK: - surviving a quit
-
-    private func saveQueue(_ saved: [Queue.Saved]) {
-        if let data = try? JSONEncoder().encode(saved) {
-            UserDefaults.standard.set(data, forKey: Self.savedQueueKey)
-        }
-    }
-
-    private func restoreQueue() {
-        guard queue.isEmpty,
-              let data = UserDefaults.standard.data(forKey: Self.savedQueueKey),
-              let saved = try? JSONDecoder().decode([Queue.Saved].self, from: data)
-        else { return }
-        queue = Queue.restore(saved)
-        for item in queue.items { measure(item.id, item.url) }
+            set: { new in if let i = model.queue.index(of: id) { model.queue.items[i] = new } })
     }
 
     // MARK: - detail
@@ -438,7 +370,7 @@ struct ContentView: View {
     @ViewBuilder
     private var detail: some View {
         if case .recording = selection, recorder.isRecording {
-            RecordingPanel(recorder: recorder, language: $language,
+            RecordingPanel(recorder: recorder, language: model.language,
                            languages: languages, onStop: toggleRecording)
         } else {
             transcriptionDetail
@@ -458,8 +390,9 @@ struct ContentView: View {
             ProgressPanel(live: engine.live,
                           current: running.url.lastPathComponent,
                           remaining: queue.waiting.count,
-                          continues: runningAll,
-                          onStop: stopEverything)
+                          continues: model.runningAll,
+                          asked: model.askedNext.map { $0.url.lastPathComponent },
+                          onStop: model.stopEverything)
         } else if case .pending(let id) = selection,
                   let item = queue.item(id), item.state == .finished {
             // The seconds between the run ending and the row leaving the
@@ -469,9 +402,10 @@ struct ContentView: View {
         } else if case .pending(let id) = selection, let item = binding(for: id) {
             PendingPanel(item: item, languages: languages,
                          engineBusy: engine.isRunning && !engine.isNaming,
+                         naming: engine.isNaming,
                          otherWaiting: queue.waiting.filter { $0.id != id }.count,
-                         onStart: { start(item.wrappedValue) },
-                         onApplyToAll: applyToAllWaiting)
+                         onStart: { model.start(item.wrappedValue) },
+                         onApplyToAll: model.applyToAllWaiting)
         } else if case .job(let dir) = selection,
                   let job = store.jobs.first(where: { $0.jobDir == dir }) {
             Group {
@@ -496,7 +430,8 @@ struct ContentView: View {
                 engine.load(jobDir: job.jobDir, source: job.sourcePath)
             }
         } else {
-            Welcome(processed: store.jobs.count, onRecord: toggleRecording)
+            Welcome(processed: store.jobs.count, language: $model.language,
+                    languages: languages, onRecord: toggleRecording)
         }
     }
 
@@ -511,7 +446,7 @@ struct ContentView: View {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = true
         panel.message = "Recordings, or a folder of them. Nothing starts until you press Transcribe."
-        if panel.runModal() == .OK { add(panel.urls) }
+        if panel.runModal() == .OK { model.add(panel.urls) }
     }
 
     /// Take a recording out of the everyday list, or put it back.
@@ -526,30 +461,13 @@ struct ContentView: View {
 
     private func forget(_ job: JobSummary, withSource: Bool) {
         deleting = nil
+        // An inbox recording whose transcript goes while the file stays is
+        // offered again at the next look at the inbox, as if nobody had dealt
+        // with it, and lands back in the queue to be transcribed once more.
+        if !withSource, Inbox.holds(job.sourcePath) { model.remember(dismissed: job.sourcePath) }
         Task {
             await store.forget(jobDir: job.jobDir, withSource: withSource)
             if case .job(let dir) = selection, dir == job.jobDir { selection = nil }
-        }
-    }
-
-    /// Move the selection onto the job the finished recording produced, and take
-    /// the row out of the queue. Needs the list to have been re-read first.
-    private func followFinished(_ item: QueueItem) {
-        Task {
-            await store.reloadAndWait()
-            let path = item.path
-            // The row leaves whether or not the job is found: a finished
-            // recording has nothing left to wait for. Matching by the engine's
-            // spelling of the path, not the Finder's, is what finds it.
-            let job = store.jobs.first { canonicalPath($0.sourcePath) == path }
-            queue.remove(item.id)
-            // Only somebody who was watching this recording is taken to its
-            // transcript. During a batch every finished file used to pull the
-            // selection to itself, out from under whatever was being read.
-            var watching = selection == nil
-            if case .pending(let id) = selection, id == item.id { watching = true }
-            guard watching else { return }
-            selection = job.map { .job($0.jobDir) }
         }
     }
 
@@ -557,7 +475,7 @@ struct ContentView: View {
     private func finish(_ job: JobSummary) {
         let url = URL(fileURLWithPath: job.sourcePath)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
-        add([url])
+        model.add([url])
         if let item = queue.items.first(where: { $0.path == canonicalPath(url.path) }) {
             selection = .pending(item.id)
         }
@@ -569,31 +487,13 @@ struct ContentView: View {
         }
     }
 
-    /// The same language and head count for every recording still waiting.
-    /// The settings belong to one recording each; this is the shortcut for a
-    /// batch that is all one meeting.
-    private func applyToAllWaiting(language: String, speakers: Int) {
-        for i in queue.items.indices where queue.items[i].state == .waiting {
-            queue.items[i].language = language
-            queue.items[i].speakers = speakers
-        }
-    }
-
     // MARK: - actions
 
     /// Record, or stop and hand what was recorded to the queue.
-    ///
-    /// Stopping does not start the transcription. A recording that has just ended
-    /// is the moment somebody is most likely to want to say how many people were
-    /// in the room, or to record the next one straight away; a run that began on
-    /// its own would hold the machine for as long as the conversation lasted.
     private func toggleRecording() {
         Task {
             if recorder.isRecording {
-                if let url = await recorder.stop() {
-                    // The language chosen for the microphone is the language of
-                    // what was just recorded.
-                    enqueue([(url: url, collection: "")], language: language)
+                if let url = await model.stopRecording() {
                     if let item = queue.items.first(where: { $0.path == canonicalPath(url.path) }) {
                         selection = .pending(item.id)
                     }
@@ -601,7 +501,7 @@ struct ContentView: View {
                     selection = nil
                 }
             } else {
-                await recorder.start(language: language)
+                await model.startRecording()
                 if recorder.isRecording { selection = .recording }
             }
         }
@@ -613,124 +513,10 @@ struct ContentView: View {
             found = true
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
-                DispatchQueue.main.async { add([url]) }
+                Task { @MainActor in model.add([url]) }
             }
         }
         return found
-    }
-
-    /// Add files, or everything under a folder, to the queue.
-    ///
-    /// Folders are walked off the main thread. A tree of a few hundred recordings
-    /// means a few hundred trips to the filesystem, and doing that while the
-    /// window is drawing is how a drag turns into a beachball.
-    private func add(_ urls: [URL]) {
-        var files: [(url: URL, collection: String)] = []
-        var folders: [URL] = []
-        for url in urls {
-            var isDirectory: ObjCBool = false
-            let there = FileManager.default.fileExists(atPath: url.path,
-                                                       isDirectory: &isDirectory)
-            if there && isDirectory.boolValue {
-                folders.append(url)
-            } else if Library.isRecording(url) {
-                files.append((url, ""))
-            }
-        }
-        enqueue(files)
-
-        guard !folders.isEmpty else { return }
-        scanning = folders.count == 1
-            ? "Looking through \(folders[0].lastPathComponent)…"
-            : "Looking through \(folders.count) folders…"
-        Task.detached(priority: .userInitiated) {
-            let found = folders.flatMap { Library.recordings(under: $0) }
-            await MainActor.run {
-                scanning = nil
-                enqueue(found)
-            }
-        }
-    }
-
-    /// The queued recordings that are new, in the order they were found.
-    private func enqueue(_ found: [(url: URL, collection: String)],
-                         language: String = "auto", select: Bool = true) {
-        let added = queue.add(found, language: language)
-        guard !added.isEmpty else { return }
-        // Read the durations afterwards and one at a time. Doing it inside the
-        // add opened every container before the list had drawn once.
-        for item in added { measure(item.id, item.url) }
-        if select, selection == nil, let first = queue.items.first {
-            selection = .pending(first.id)
-        }
-    }
-
-    private func start(_ item: QueueItem) {
-        guard Queue.canStart(item.state, engineBusy: false), !engine.isNaming else { return }
-        if engine.isRunning {
-            // Asked while another one runs: this one goes next, and the queue
-            // carries on from there. Pressing the button used to do nothing,
-            // silently, which is the worst thing a button can do.
-            queue.mark(item.id, .waiting)
-            queue.moveToFront(item.id)
-            runningAll = true
-            return
-        }
-        mark(item.id, .running)
-        engine.run(file: item.url, language: item.language,
-                   minSpeakers: item.speakers > 0 ? item.speakers : nil,
-                   maxSpeakers: item.speakers > 0 ? item.speakers : nil,
-                   collection: item.collection) { outcome in
-            switch outcome {
-            case .finished:
-                mark(item.id, .finished)
-                // Follow it into the list. The pane used to fall back to the
-                // setup screen, offering to transcribe again a recording that
-                // had just been transcribed, while the row sat under "Waiting".
-                followFinished(item)
-            case .failed:
-                // The reason, not the fact. "Did not finish" was true and useless,
-                // and the alert carrying the real message is dismissed once.
-                mark(item.id, .failed(engine.failureSummary))
-            case .cancelled:
-                // Asked for. Back in the queue rather than marked as broken.
-                mark(item.id, .waiting)
-            }
-            if case .finished = outcome {} else { store.reload() }
-            if runningAll, outcome != .cancelled { next() }
-        }
-    }
-
-    private func startAll() {
-        runningAll = queue.waiting.count > 1
-        next()
-    }
-
-    /// One at a time. Whisper already spreads across every fast CPU, so two
-    /// transcriptions at once finish later than the same two in sequence, and the
-    /// machine is unusable while they run.
-    private func next() {
-        guard let item = queue.nextToRun else {
-            runningAll = false
-            return
-        }
-        start(item)
-    }
-
-    /// Stop the running job and empty the rest of the queue.
-    ///
-    /// Stopping one and starting the next is not what anybody means by Stop, and
-    /// the queue was started by one press of one button, so it ends the same way.
-    /// Everything still waiting goes back to waiting rather than being thrown
-    /// away: the files are still listed and one more press starts them again.
-    private func stopEverything() {
-        runningAll = false
-        engine.cancel()
-        queue.stopAll()
-    }
-
-    private func mark(_ id: UUID, _ state: QueueItem.State) {
-        queue.mark(id, state)
     }
 }
 
@@ -744,6 +530,45 @@ func readySectionEmptyText(loading: Bool, problem: String?, filter: String) -> S
     if loading { return "Reading the list…" }
     return filter.isEmpty ? "Nothing yet. Drop a recording anywhere in this window."
                           : "Nothing matches \(filter)."
+}
+
+/// The sentence for a live text whose language is a guess, or nil when the
+/// person chose one.
+///
+/// The speech model behind the live text cannot detect a language, and the
+/// pipeline's detection samples the finished file, which does not exist yet. So
+/// "detect automatically" means the language of this Mac (LiveTranscriber,
+/// `resolve`: keep the two in step), and a Spanish conversation on an Italian
+/// Mac came out as Italian words of Spanish speech with nothing to say so.
+func liveLanguageNote(language: String,
+                      systemCode: String? = Locale.current.language.languageCode?.identifier)
+    -> String? {
+    guard language == "auto" else { return nil }
+    let code = systemCode ?? "en"
+    let name = Locale(identifier: "en").localizedString(forLanguageCode: code) ?? code
+    return "The language is a guess: live text cannot detect it, so it is listening for "
+         + "\(name), the language of this Mac. In another language it will be wrong. "
+         + "The document is not affected: its language is detected afterwards from "
+         + "the whole recording."
+}
+
+/// A line across the top of the window for something that has no row to sit on.
+struct NoticeBanner: View {
+    let text: String
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Text(text)
+                .font(.callout)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+            Button("Close", action: onClose).buttonStyle(.link)
+        }
+        .padding(12)
+        .background(.regularMaterial)
+    }
 }
 
 // MARK: - recording
@@ -808,7 +633,8 @@ struct LevelBar: View {
 /// The pane while recording: how long, how loud, and the live text if it is on.
 struct RecordingPanel: View {
     @ObservedObject var recorder: Recorder
-    @Binding var language: String
+    /// Shown, not chosen: it was set on the welcome screen before recording.
+    let language: String
     let languages: [(String, String)]
     let onStop: () -> Void
 
@@ -817,7 +643,7 @@ struct RecordingPanel: View {
             header
             Divider()
             if recorder.liveTextEnabled {
-                LiveTextView(live: recorder.live)
+                LiveTextView(live: recorder.live, languageNote: liveLanguageNote(language: language))
             } else {
                 explanation
             }
@@ -839,6 +665,10 @@ struct RecordingPanel: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .help("Set before recording starts, on the welcome screen or in Settings.")
+                Label(languageName, systemImage: "globe")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .help("The language this recording is queued with. Set before recording starts, on the welcome screen.")
                 Button(role: .destructive, action: onStop) {
                     Label("Stop", systemImage: "stop.fill")
                 }
@@ -851,6 +681,10 @@ struct RecordingPanel: View {
             }
         }
         .padding(20)
+    }
+
+    private var languageName: String {
+        languages.first { $0.0 == language }?.1 ?? language
     }
 
     private var explanation: some View {
@@ -902,6 +736,8 @@ struct RecordingClock: View {
 /// which half that is.
 struct LiveTextView: View {
     @ObservedObject var live: LiveText
+    /// Set when the language is a guess, so the pane says so above the words.
+    let languageNote: String?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -911,6 +747,12 @@ struct LiveTextView: View {
                         Label(unavailable, systemImage: "info.circle")
                             .font(.callout)
                             .foregroundStyle(.secondary)
+                    }
+                    if let languageNote {
+                        Label(languageNote, systemImage: "questionmark.circle")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     // One Text built by concatenation rather than two views, so
                     // the hypothesis flows on from the settled words instead of
@@ -953,7 +795,17 @@ struct QueueRow: View {
             case .failed:   Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.url.lastPathComponent).lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(item.url.lastPathComponent).lineLimit(1)
+                    // The words are in the panel; the row only says there are some.
+                    if let note = item.note {
+                        Image(systemName: note.isWarning ? "exclamationmark.triangle.fill"
+                                                         : "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(note.isWarning ? Color.orange : .secondary)
+                            .help(note.text)
+                    }
+                }
                 if case .failed(let why) = item.state {
                     Text(why).font(.caption).foregroundStyle(.orange)
                 } else if !item.collection.isEmpty {
@@ -1131,6 +983,12 @@ struct UnfinishedPanel: View {
 
 struct Welcome: View {
     let processed: Int
+    /// The microphone language. It sets the live text and is the language the
+    /// recording joins the queue with, so it is chosen here, before recording,
+    /// next to the switch for the live text. It had no control anywhere, and
+    /// stayed on automatic.
+    @Binding var language: String
+    let languages: [(String, String)]
     let onRecord: () -> Void
     /// The live preview has to be decided here, because once recording has started
     /// it is too late: the analyzer is built against the microphone at the moment
@@ -1140,6 +998,42 @@ struct Welcome: View {
     @AppStorage("liveTextEnabled") private var liveText = false
 
     var body: some View {
+        // In a scroll view like every other panel of the detail pane: the
+        // language line made this one taller than a short window. The content
+        // is still centred when it fits.
+        GeometryReader { geo in
+            ScrollView {
+                content
+                    .padding()
+                    .frame(maxWidth: .infinity, minHeight: geo.size.height)
+            }
+        }
+    }
+
+    private var liveTextToggle: some View {
+        Toggle("Show the words while recording", isOn: $liveText)
+            .toggleStyle(.checkbox)
+    }
+
+    private var languagePicker: some View {
+        // The pop-up gets a width of its own. `fixedSize` alone was not enough:
+        // in the real window, after a relaunch, the natural width it fixed was
+        // 32 points, the first letter and the arrows. The widest name in the
+        // list, "Detect automatically", fits in 180.
+        HStack(spacing: 6) {
+            Text("Language")
+            Picker("Language", selection: $language) {
+                ForEach(languages, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .labelsHidden()
+            .frame(width: 180)
+        }
+        .fixedSize()
+        .help("The language of the conversation. It sets the live text, and the "
+              + "recording joins the queue with it.")
+    }
+
+    private var content: some View {
         VStack(spacing: 14) {
             Image(systemName: "waveform").font(.system(size: 44)).foregroundStyle(.secondary)
             Text("Drop recordings here").font(.title3).bold()
@@ -1156,8 +1050,17 @@ struct Welcome: View {
                 Label("Record a conversation", systemImage: "record.circle")
             }
             .controlSize(.large)
-            Toggle("Show the words while recording", isOn: $liveText)
-                .toggleStyle(.checkbox)
+            // Side by side when the pane has room for both, one above the other when
+            // it has not. A pop-up button offered less than its own width is not
+            // cut off or wrapped, it shrinks to a few points showing the first
+            // letter and an ellipsis: after a relaunch the Language picker was seen
+            // 32 points wide. `fixedSize` keeps it at its natural width, and since
+            // it no longer gives way the layout has to, so the row falls back to two
+            // lines instead of squeezing the checkbox's words.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 18) { liveTextToggle; languagePicker }
+                VStack(spacing: 10) { liveTextToggle; languagePicker }
+            }
             Text(liveText
                  ? "A preview from the model built into macOS, about a second behind. "
                    + "It is not kept: the document still comes from whisper afterwards."
@@ -1166,6 +1069,13 @@ struct Welcome: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)
+            if liveText, let guess = liveLanguageNote(language: language) {
+                Text(guess)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+            }
 
             if processed > 0 {
                 Text("\(processed) recordings already processed, listed in the sidebar.")
@@ -1173,8 +1083,6 @@ struct Welcome: View {
                     .padding(.top, 6)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
     }
 }
 
@@ -1190,6 +1098,9 @@ struct PendingPanel: View {
     /// Another recording is being transcribed. The button then queues this one
     /// behind it rather than doing nothing.
     let engineBusy: Bool
+    /// A save of names is running. Nothing can start behind it, and the button
+    /// used to look live and do nothing.
+    let naming: Bool
     /// How many other recordings are waiting, for the shortcut that gives them
     /// all the same settings.
     let otherWaiting: Int
@@ -1203,6 +1114,15 @@ struct PendingPanel: View {
                     Text(item.url.lastPathComponent).font(.title2).bold()
                     Text(item.url.deletingLastPathComponent().path)
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+
+                if let note = item.note {
+                    Label(note.text, systemImage: note.isWarning ? "exclamationmark.triangle.fill"
+                                                                 : "info.circle")
+                        .font(.callout)
+                        .foregroundStyle(note.isWarning ? Color.orange : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
 
                 if case .failed(let why) = item.state {
@@ -1260,7 +1180,7 @@ struct PendingPanel: View {
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
-                .disabled(!Queue.canStart(item.state, engineBusy: false))
+                .disabled(!Queue.canStart(item.state, engineBusy: naming))
 
                 Text(footer)
                     .font(.caption).foregroundStyle(.secondary)
@@ -1279,9 +1199,13 @@ struct PendingPanel: View {
     }
 
     private var footer: String {
+        if naming {
+            return "The names are being saved. This can start when that is done."
+        }
         if engineBusy {
             return "Another recording is being transcribed. Press the button and this one "
-                 + "goes next, as soon as that one finishes."
+                 + "goes next, as soon as that one finishes. Then it stops: the others "
+                 + "wait until you choose Transcribe all."
         }
         return "Transcription and voice separation both run on the Mac's graphics "
              + "chip and take up to about half the length of the recording. The rest "
@@ -1405,6 +1329,8 @@ struct ProgressPanel: View {
     /// all"; they do not after the Transcribe button on a single recording,
     /// and the panel used to promise "N more after this one" either way.
     let continues: Bool
+    /// The recordings somebody put next, by name. They run and the queue stops.
+    let asked: [String]
     let onStop: () -> Void
 
     private let order: [Phase] = [.preparing, .detecting, .transcribing,
@@ -1434,7 +1360,7 @@ struct ProgressPanel: View {
                 if !current.isEmpty {
                     Text(current).font(.callout).foregroundStyle(.secondary)
                 }
-                if let more = Queue.remainingText(remaining, continues: continues) {
+                if let more = Queue.remainingText(remaining, continues: continues, asked: asked) {
                     Text(more)
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

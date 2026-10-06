@@ -21,6 +21,14 @@ enum Inbox {
         return home.appendingPathComponent("inbox")
     }
 
+    /// Whether a recording sits in the inbox, however either path is spelled.
+    /// The job list says where a recording came from; whether that was here is
+    /// not written down anywhere else.
+    static func holds(_ path: String, in folder: URL = folder) -> Bool {
+        guard !path.isEmpty else { return false }
+        return canonicalPath(path).hasPrefix(canonicalPath(folder.path) + "/")
+    }
+
     /// Every recording in the folder, whoever has dealt with it.
     static func contents(in folder: URL = folder) -> [(url: URL, collection: String)] {
         var isDir: ObjCBool = false

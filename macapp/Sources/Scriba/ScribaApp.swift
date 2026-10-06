@@ -23,14 +23,31 @@ struct Entry {
 
 struct ScribaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        WindowGroup("Scriba") {
-            ContentView()
+        // The delegate hears the Dock icon being clicked and has to open the window
+        // then, and only the App can read the action that does it. Handed over on
+        // every evaluation, so it is there before anything can ask.
+        let _ = { delegate.showWindow = { openWindow(id: "main") } }()
+
+        // One window, not a group of them. A WindowGroup made a new window on
+        // demand and had no way to bring a closed one back: once it was closed,
+        // nothing in the menus opened another (the command for it is removed
+        // below) and neither did a click on the Dock icon, while the run it had
+        // been showing carried on. A Window is the one window, which macOS can
+        // reopen, and a second one cannot exist.
+        Window("Scriba", id: "main") {
+            ContentView(model: delegate.model)
         }
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) { }
+            // Where somebody looks for a window that is not there. The system lists
+            // a window that is open, not one that was closed.
+            CommandGroup(after: .windowList) {
+                Button("Show Scriba") { openWindow(id: "main") }
+            }
             CommandGroup(after: .toolbar) {
                 Button("Refresh the list") {
                     NotificationCenter.default.post(name: .scribaRefresh, object: nil)
@@ -84,12 +101,68 @@ extension Notification.Name {
     static let scribaRecord = Notification.Name("dev.nerelli.scriba.record")
 }
 
-/// Exists for one line: quitting has to take the engine with it.
+/// Owns what has to outlive the window, and sees the app out.
+///
+/// The delegate is made once when the app starts and kept until it quits, which
+/// is what the model needs: closing the window must not take the queue, the
+/// engine or the recorder with it. Quitting has to take the engine with it, and
+/// close a recording that is in progress.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static var onQuit: (() -> Void)?
+    let model = AppModel()
+
+    /// Opens the window (or brings it forward). Set by the App, which is the one
+    /// that can read the action from the environment.
+    var showWindow: (() -> Void)?
+
+    /// A click on the Dock icon, or `open` on a running app, with no window on
+    /// screen. The window scene does not come back by itself after it was closed:
+    /// the system sends this and nothing else reopens it.
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                       hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showWindow?() }
+        return true
+    }
+
+    /// Closing the window is not quitting. An app whose only scene is a single
+    /// `Window` quits when that window closes unless it says otherwise, and the
+    /// first build with one stopped a transcription halfway the moment its
+    /// window was closed, which is the one thing the README promises it will not.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    /// A recording is closed by an async stop, and the main thread cannot wait
+    /// for it: the stop runs on the main actor, so waiting for it here is waiting
+    /// for oneself, and three seconds later the app exited with the file still
+    /// open. Say the app will answer later, and answer when the file is closed.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // The run goes at once, whatever else is still being closed.
+        model.engine.terminateChild()
+        guard model.recorder.isRecording else { return .terminateNow }
+        Task {
+            await model.stopRecording()
+            answerQuit()
+        }
+        // A speech model that never finishes must not keep the app from quitting.
+        Task {
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            answerQuit()
+        }
+        return .terminateLater
+    }
+
+    private var answered = false
+
+    private func answerQuit() {
+        guard !answered else { return }
+        answered = true
+        NSApp.reply(toApplicationShouldTerminate: true)
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
-        AppDelegate.onQuit?()
+        model.engine.terminateChild()
+        model.letTheMacSleep()
     }
 }
 
@@ -102,6 +175,10 @@ struct SettingsView: View {
 
     enum TokenState: Equatable {
         case unknown, present, saved, missing, failed(String)
+        /// A token is there and the Keychain would not remove it.
+        case stuck(String)
+        /// The Keychain is being asked, with the word for what is happening.
+        case working(String)
     }
 
     private var engineFolderState: String {
@@ -148,20 +225,20 @@ struct SettingsView: View {
             }
             Section("pyannote token") {
                 // A secure field, and the value never leaves this window: it goes
-                // straight into the Keychain through the Security framework. The
-                // old instruction here was to type `scriba token hf_...` into a
-                // terminal, which leaves the secret in the shell history.
+                // to the `security` tool on its standard input, never in an
+                // argument list or the environment, where other processes could
+                // read it. The old instruction here was to type `scriba token
+                // hf_...` into a terminal, which leaves the secret in the shell
+                // history.
                 SecureField("hf_…", text: $token)
                     .onSubmit(saveToken)
+                    .disabled(busy)
                 HStack {
                     Button("Save in the Keychain", action: saveToken)
-                        .disabled(token.trimmingCharacters(in: .whitespaces).isEmpty)
-                    if tokenState == .present || tokenState == .saved {
-                        Button("Remove") {
-                            Keychain.forget()
-                            token = ""
-                            tokenState = .missing
-                        }
+                        .disabled(busy || token.trimmingCharacters(in: .whitespaces).isEmpty)
+                    if tokenHere {
+                        Button("Remove", action: removeToken)
+                            .disabled(busy)
                     }
                     Spacer()
                 }
@@ -175,15 +252,49 @@ struct SettingsView: View {
         .onAppear { tokenState = Keychain.hasToken() ? .present : .missing }
     }
 
+    private var tokenHere: Bool {
+        switch tokenState {
+        case .present, .saved, .stuck: return true
+        default: return false
+        }
+    }
+
+    private var busy: Bool {
+        if case .working = tokenState { return true }
+        return false
+    }
+
+    /// Says "no token" only when the Keychain no longer has one. This used to
+    /// change the message whatever the Keychain answered.
+    ///
+    /// Both of these wait for the `security` tool off the main thread: if the
+    /// Keychain ever asks the person something, the window stays alive while it
+    /// waits, and says so.
+    private func removeToken() {
+        guard !busy else { return }
+        token = ""
+        tokenState = .working("Removing the token…")
+        Task {
+            let why = await Keychain.inBackground { Keychain.forget() }
+            tokenState = why.map { .stuck($0) } ?? .missing
+        }
+    }
+
     private func saveToken() {
-        if let problem = Keychain.save(token) {
-            tokenState = .failed(problem)
-        } else {
-            // Clear the field on success. Leaving the token sitting in a window
-            // that anybody walking past can reveal is the thing this section
-            // exists to avoid.
-            token = ""
-            tokenState = .saved
+        guard !busy else { return }
+        let value = token
+        tokenState = .working("Saving the token…")
+        Task {
+            let problem = await Keychain.inBackground { Keychain.save(value) }
+            if let problem {
+                tokenState = .failed(problem)
+            } else {
+                // Clear the field on success. Leaving the token sitting in a window
+                // that anybody walking past can reveal is the thing this section
+                // exists to avoid.
+                token = ""
+                tokenState = .saved
+            }
         }
     }
 
@@ -196,13 +307,13 @@ struct SettingsView: View {
             return "No token yet. Without one the recordings are transcribed but not "
                  + "separated by speaker. Get one from huggingface.co/settings/tokens "
                  + "and accept the conditions on pyannote/speaker-diarization-community-1."
-        case .failed(let why): return why
+        case .failed(let why), .stuck(let why), .working(let why): return why
         }
     }
 
     private var tokenColour: Color {
         switch tokenState {
-        case .failed: return .red
+        case .failed, .stuck: return .red
         case .saved, .present: return .secondary
         default: return .secondary
         }

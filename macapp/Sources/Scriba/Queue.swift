@@ -53,8 +53,8 @@ struct Queue: Equatable {
             parts.append("Waiting to be transcribed (\(waiting.count))")
         }
         if !failed.isEmpty {
-            // "With a problem" rather than "did not finish": half of these never
-            // started, because the file was a header with no audio behind it.
+            // "With a problem" rather than "did not finish": some of these never
+            // started, because the file had moved or was not audio.
             parts.append(failed.count == 1 ? "1 with a problem" : "\(failed.count) with a problem")
         }
         if parts.isEmpty { return "Transcribed" }
@@ -87,14 +87,35 @@ struct Queue: Equatable {
         return "\(length) of audio, up to about \(work) min of work."
     }
 
-    /// What the progress panel says under the running recording.
-    static func remainingText(_ remaining: Int, continues: Bool) -> String? {
+    /// What the progress panel says under the running recording. `asked` is the
+    /// recordings somebody put next: they run, in that order, and the queue stops
+    /// again behind them.
+    static func remainingText(_ remaining: Int, continues: Bool,
+                              asked: [String] = []) -> String? {
         guard remaining > 0 else { return nil }
         let more = remaining == 1 ? "1 more" : "\(remaining) more"
-        return continues
-            ? "\(more) after this one"
-            : "\(more) waiting. They do not start on their own: choose Transcribe all (⌘T), "
-              + "or open one and put it next."
+        if continues { return "\(more) after this one" }
+        let rest = "choose Transcribe all (⌘T), or open one and put it next."
+        guard !asked.isEmpty else {
+            return "\(more) waiting. They do not start on their own: " + rest
+        }
+        let goes = asked.count == 1 ? "\(asked[0]) goes next"
+                                    : "\(asked.count) go next, in the order they were asked for"
+        let others = remaining - asked.count
+        guard others > 0 else { return goes + ", and then it stops." }
+        let waits = others == 1 ? "The other one does not start on its own: "
+                                : "The other \(others) do not start on their own: "
+        return goes + ", and then it stops. " + waits + rest
+    }
+
+    /// The one message a batch gives when it ends, or nil if nothing failed.
+    /// The reasons are on the rows as well; this is the place they are read
+    /// together, once, instead of one alert per file.
+    static func batchSummary(_ failures: [(name: String, reason: String)]) -> String? {
+        guard !failures.isEmpty else { return nil }
+        let head = failures.count == 1 ? "1 recording did not go through:"
+                                       : "\(failures.count) recordings did not go through:"
+        return ([head] + failures.map { "\($0.name): \($0.reason)" }).joined(separator: "\n")
     }
 
     /// Whether the Transcribe button on a queued recording does anything.
@@ -118,7 +139,7 @@ struct Queue: Equatable {
             var item = QueueItem(url: entry.url, collection: entry.collection)
             item.language = language
             item.speakers = speakers
-            if let why = Self.problem(with: entry.url) { item.state = .failed(why) }
+            item.note = Self.note(for: entry.url)
             added.append(item)
         }
         items.append(contentsOf: added)
@@ -169,26 +190,31 @@ struct Queue: Equatable {
         }
     }
 
-    // MARK: - files that are not really there
+    // MARK: - files that may not be what they seem
 
-    /// Why this file cannot be transcribed, before the engine is even asked, or
-    /// nil if it can. The same three checks the engine makes (audio.py,
-    /// `placeholder`): a cloud placeholder, a size with nothing behind it, and a
-    /// container too small to hold a second of audio. Made here so the row can
-    /// say so the moment it is added, instead of after a run that fails on it.
-    static func problem(with url: URL) -> String? {
+    /// What to say about this file before the engine is asked, or nil.
+    ///
+    /// It says, and does not refuse. The rows used to be marked failed here, with
+    /// a reason that was a guess: a ten-second voice note at 32 kbps is forty
+    /// kilobytes and was called "a header with no audio behind it", and a file
+    /// that iCloud had moved off this Mac was called "not on this Mac" although
+    /// reading it, which is the first thing the engine does, makes the system
+    /// fetch it. A failed row is skipped by Transcribe all, so both were never
+    /// transcribed. The engine opens the file first and explains itself only if
+    /// that fails (audio.py, `placeholder`); this leaves the decision there.
+    static func note(for url: URL) -> QueueItem.Note? {
         var st = stat()
         guard stat(url.path, &st) == 0 else { return nil }
         let datalessFlag: UInt32 = 0x4000_0000  // SF_DATALESS
-        if st.st_flags & datalessFlag != 0 {
-            return "A placeholder: the contents are held by a cloud service and are not on this Mac."
-        }
-        if st.st_size > 0 && st.st_blocks == 0 {
-            return "Reports a size and holds no data: a cloud service has its contents."
+        if st.st_flags & datalessFlag != 0 || (st.st_size > 0 && st.st_blocks == 0) {
+            return QueueItem.Note(text: "The contents are held by a cloud service and are not on "
+                + "this Mac yet. Starting it makes the system fetch them first, which can "
+                + "take a while. If they cannot be fetched the run says so.")
         }
         if st.st_size > 0 && st.st_size < 64 * 1024 {
-            return "\(st.st_size / 1024) KB, a header with no audio behind it. "
-                 + "The copy was made before the recording had been downloaded."
+            return QueueItem.Note(text: "\(max(1, st.st_size / 1024)) KB is small for a "
+                + "recording. A short voice note can be this size; a copy made before the "
+                + "download had finished looks the same, and if so the run says so.")
         }
         return nil
     }

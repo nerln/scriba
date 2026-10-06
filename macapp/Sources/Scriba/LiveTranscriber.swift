@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import os
 import Speech
 
 /// Live text while the microphone is running, from the speech model built into
@@ -30,7 +31,9 @@ final class LiveTranscriber: LiveTranscribing, @unchecked Sendable {
 
     private let transcriber: SpeechTranscriber
     private let analyzer: SpeechAnalyzer
-    private let converter: AVAudioConverter
+    /// Replaced when the microphone changes, while `feed` may be running on the
+    /// audio thread, hence the lock around the one reference.
+    private let converter: OSAllocatedUnfairLock<AVAudioConverter>
     private let analyzerFormat: AVAudioFormat
     private let continuation: AsyncStream<AnalyzerInput>.Continuation
     private var collector: Task<Void, Never>?
@@ -65,11 +68,10 @@ final class LiveTranscriber: LiveTranscribing, @unchecked Sendable {
         // The microphone hands over 48 kHz float; the analyzer wants its own
         // format. Pushing the tap buffer in unconverted is not an error that can
         // be caught, it takes the process down inside the audio layer.
-        guard let converter = AVAudioConverter(from: tapFormat, to: format) else {
+        guard let converter = Recorder.makeConverter(from: tapFormat, to: format) else {
             throw LiveError.noConverter
         }
-        converter.sampleRateConverterQuality = AVAudioQuality.max.rawValue
-        self.converter = converter
+        self.converter = OSAllocatedUnfairLock(uncheckedState: converter)
 
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         self.continuation = continuation
@@ -103,10 +105,24 @@ final class LiveTranscriber: LiveTranscribing, @unchecked Sendable {
 
     /// Called from the audio thread. Converts and hands over, nothing else.
     func feed(_ buffer: AVAudioPCMBuffer) {
-        guard !finished,
-              let converted = Recorder.convert(buffer, with: converter, to: analyzerFormat)
+        guard !finished else { return }
+        let converter = self.converter.withLockUnchecked { $0 }
+        guard let converted = Recorder.convert(buffer, with: converter, to: analyzerFormat)
         else { return }
         continuation.yield(AnalyzerInput(buffer: converted))
+    }
+
+    /// The microphone changed (AirPods connected, a USB microphone pulled out) and
+    /// the tap is going back in on a new format. The analyzer is not touched: it
+    /// takes its own format, which has not changed, and goes on reading from the
+    /// stream. Only what turns the microphone's buffers into that format is
+    /// replaced, while the tap is out and nothing is calling `feed`.
+    func follow(_ format: AVAudioFormat) -> Bool {
+        guard let next = Recorder.makeConverter(from: format, to: analyzerFormat) else {
+            return false
+        }
+        converter.withLockUnchecked { $0 = next }
+        return true
     }
 
     func finish() async {

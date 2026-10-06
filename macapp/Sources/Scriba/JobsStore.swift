@@ -102,8 +102,73 @@ struct QueueItem: Identifiable, Hashable {
     /// How many people were in the room, 0 for "as many as it finds".
     var speakers: Int = 0
 
+    /// Something to know about this file that is not a reason to refuse it. The
+    /// row is still waiting and the engine still decides: it is told, and it
+    /// explains itself if the file turns out to be empty.
+    struct Note: Hashable {
+        var text: String
+        /// A warning is drawn in orange. A hint is only said.
+        var isWarning = false
+    }
+    var note: Note?
+
     /// The file this item stands for, spelled the way the engine spells it.
     var path: String { canonicalPath(url.path) }
+}
+
+/// Which reads of the job list may land on screen.
+///
+/// A read takes about three seconds. Archive and delete change the screen at
+/// once and the disk a moment later, so a read that began before the change, or
+/// while it was being written, describes the old state, and landing it put the
+/// archived row back in "Ready to read" (or the deleted one back, to be opened
+/// into "This job has no readable state"). The follow-up read after a delete was
+/// skipped because the stale one was still in flight. Every change moves the
+/// generation on, before the engine is told and again once it has answered; a
+/// read counts only if it began at the current generation and nothing is being
+/// written while it lands.
+struct ReadGate {
+    private var generation = 0
+    private var commands = 0
+    private var owed = false
+
+    enum Verdict: Equatable {
+        case apply
+        /// Thrown away. `readAgain` says whether to start another read now, or
+        /// whether the command still in flight will do that when it answers.
+        case discard(readAgain: Bool)
+    }
+
+    /// Taken when a read starts, handed back when it lands.
+    var token: Int { generation }
+
+    /// A change is about to be made on screen and sent to the engine.
+    mutating func commandStarted() {
+        commands += 1
+        generation += 1
+    }
+
+    /// The engine answered. True when a read is owed now: one was thrown away
+    /// while this was in flight, or the command failed and the screen may be
+    /// ahead of the disk.
+    mutating func commandEnded(succeeded: Bool) -> Bool {
+        commands -= 1
+        generation += 1
+        if !succeeded { owed = true }
+        return settle()
+    }
+
+    mutating func landed(_ token: Int) -> Verdict {
+        if token == generation && commands == 0 { return .apply }
+        owed = true
+        return .discard(readAgain: settle())
+    }
+
+    private mutating func settle() -> Bool {
+        guard owed, commands == 0 else { return false }
+        owed = false
+        return true
+    }
 }
 
 /// The list of everything scriba has touched.
@@ -120,6 +185,8 @@ final class JobsStore: ObservableObject {
     /// be shown as the first, on a machine holding dozens of transcripts.
     @Published var problem: String?
 
+    private var gate = ReadGate()
+
     /// For callers that need the list to be current before they act on it.
     func reloadAndWait() async {
         reload()
@@ -132,6 +199,7 @@ final class JobsStore: ObservableObject {
         // four of them on the processor at once, each one racing to publish.
         guard !isLoading else { return }
         isLoading = true
+        let token = gate.token
         let python = Engine.pythonPath
         let root = Engine.enginePath
 
@@ -168,11 +236,17 @@ final class JobsStore: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.isLoading = false
-                self.problem = problem
-                // Only replace the list with one that was actually read. A failed
-                // read used to empty the sidebar, and the app looked like a fresh
-                // install with nothing in it.
-                if let result, result != self.jobs { self.jobs = result }
+                switch self.gate.landed(token) {
+                case .discard(let readAgain):
+                    // Older than something done on screen since: it would undo it.
+                    if readAgain { self.reload() }
+                case .apply:
+                    self.problem = problem
+                    // Only replace the list with one that was actually read. A failed
+                    // read used to empty the sidebar, and the app looked like a fresh
+                    // install with nothing in it.
+                    if let result, result != self.jobs { self.jobs = result }
+                }
             }
         }
     }
@@ -183,28 +257,32 @@ final class JobsStore: ObservableObject {
     /// for a Python interpreter to start means a row that sits there for a
     /// second after the swipe, which reads as a swipe that did not work.
     func archive(jobDir: String, value: Bool) async {
+        gate.commandStarted()
         if let i = jobs.firstIndex(where: { $0.jobDir == jobDir }) {
             jobs[i].archived = value
         }
-        await run(["jobs", "archive", jobDir] + (value ? [] : ["--undo"]))
+        let ok = await run(["jobs", "archive", jobDir] + (value ? [] : ["--undo"]))
+        if gate.commandEnded(succeeded: ok) { reload() }
     }
 
     /// Delete a job folder, and the recording it came from only if asked.
     func forget(jobDir: String, withSource: Bool) async {
+        gate.commandStarted()
         jobs.removeAll { $0.jobDir == jobDir }
-        await run(["jobs", "forget", jobDir, "--yes"] + (withSource ? ["--with-source"] : []))
+        let ok = await run(["jobs", "forget", jobDir, "--yes"] + (withSource ? ["--with-source"] : []))
+        _ = gate.commandEnded(succeeded: ok)
         reload()
     }
 
-    /// One engine command, waited for, output discarded.
+    /// One engine command, waited for, output discarded. Says whether it worked.
     ///
-    /// A failure reloads the list rather than raising a dialog: the sidebar is
-    /// the truth, so a row that comes back says the archive did not happen, and
-    /// says it where the person is already looking.
-    private func run(_ arguments: [String]) async {
+    /// A failure reads the list again rather than raising a dialog: the sidebar
+    /// is the truth, so a row that comes back says the archive did not happen,
+    /// and says it where the person is already looking.
+    private func run(_ arguments: [String]) async -> Bool {
         let python = Engine.pythonPath
         let root = Engine.enginePath
-        let ok = await Task.detached(priority: .userInitiated) { () -> Bool in
+        return await Task.detached(priority: .userInitiated) { () -> Bool in
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: python)
             proc.arguments = ["-m", "scriba.cli"] + arguments
@@ -218,6 +296,5 @@ final class JobsStore: ObservableObject {
             proc.waitUntilExit()
             return proc.terminationStatus == 0
         }.value
-        if !ok { reload() }
     }
 }

@@ -200,14 +200,15 @@ struct KeychainTests {
     func roundTrip() throws {
         // Against a throwaway service name: the real one holds the user's token
         // and a test has no business touching it. What this checks is that a
-        // generic password written through the Security framework is the shape
+        // generic password written through `security -i` is what
         // `security find-generic-password -s <service> -w` returns, which is how
-        // config.py reads it.
+        // config.py reads it. It touches the real Keychain, so it is not in the
+        // filtered runs.
         let service = "scriba-tests-\(UUID().uuidString)"
         defer { Keychain.forget(service: service) }
 
         #expect(Keychain.hasToken(service: service) == false)
-        #expect(Keychain.save("hf_not_a_real_token", service: service) == nil)
+        #expect(Keychain.save("hf_notARealToken0123", service: service) == nil)
         #expect(Keychain.hasToken(service: service))
 
         let read = Process()
@@ -220,7 +221,7 @@ struct KeychainTests {
         read.waitUntilExit()
         let value = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        #expect(value == "hf_not_a_real_token")
+        #expect(value == "hf_notARealToken0123")
     }
 
     @Test("an empty token is refused rather than stored")

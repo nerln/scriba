@@ -50,7 +50,6 @@ final class Engine: ObservableObject {
     /// the job runs, and republishing it was the whole problem.
     private(set) var log: [String] = []
     private var lastPublish = Date.distantPast
-    private var residue = ""
     @Published var info: JobInfo?
     @Published var speakers: [Speaker] = []
     @Published var errorText: String?
@@ -69,9 +68,29 @@ final class Engine: ObservableObject {
     /// lines of a log nobody needed.
     private(set) var wasCancelled = false
 
+    /// What the engine itself said went wrong in the run that just ended: the
+    /// line it printed after its marker, or the sentence for a Python that could
+    /// not be started. Nil when the engine said nothing readable.
+    ///
+    /// Kept apart from `errorText` on purpose. `errorText` is what the alert
+    /// shows, so the Close button empties it, and the marker arrives while a
+    /// process holding twenty gigabytes of Metal memory is still exiting, which
+    /// is time enough to press Close. The run then ended with nothing in
+    /// `errorText`, and the row was given the tail of the log, whose last line
+    /// was the end of a wrapped sentence about memory allocations.
+    private(set) var failureReason: String?
+
     /// One line saying why the last run stopped, for a list that has room for one
     /// line. The alert carries the full text and is dismissed once; this stays.
-    var failureSummary: String { Engine.summarise(errorText) }
+    var failureSummary: String { Engine.summarise(failureReason ?? errorText) }
+
+    /// A message of several lines on one, for a place with room for one.
+    nonisolated static func oneLine(_ text: String) -> String {
+        text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
 
     /// The one line worth keeping out of an error text.
     ///
@@ -141,12 +160,12 @@ final class Engine: ObservableObject {
     /// Mirrors ERR_NO_TOKEN in scriba/pipeline.py. The one string that genuinely
     /// crosses the Python/Swift boundary, so it is spelled out in one place on
     /// each side rather than buried inside a condition.
-    static let errNoToken = "[scriba:error:hf-token]"
+    nonisolated static let errNoToken = "[scriba:error:hf-token]"
     /// Mirrors ERR_MARK. Printed by the engine once per failed file, on its own
     /// line, when SCRIBA_MARKERS is set in its environment, which `launch`
     /// does. The line carries the reason, so the row can show the reason
     /// rather than the exit code.
-    static let errMark = "[scriba:error]"
+    nonisolated static let errMark = "[scriba:error]"
 
     // MARK: - execution
 
@@ -181,7 +200,7 @@ final class Engine: ObservableObject {
                     onFinish: ((Outcome) -> Void)? = nil) {
         guard !isRunning else { return }
         var args = ["-m", "scriba.cli", "name", file.path]
-        args += mapping.filter { !$0.value.isEmpty }.map { "\($0.key)=\($0.value)" }
+        args += Self.nameArguments(mapping)
         if !enroll { args.append("--no-enroll") }
         isNaming = true
         launch(args, on: file, startingPhase: .identifying) { [weak self] outcome in
@@ -190,14 +209,41 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// `LABEL=Name` for each entry, in a fixed order. An empty name is sent as it
+    /// is, `LABEL=`: that is how the engine is told to forget a name. Empty
+    /// entries used to be dropped before the command was built, so a wrong name
+    /// could be replaced but never removed.
+    nonisolated static func nameArguments(_ mapping: [String: String]) -> [String] {
+        mapping.sorted { $0.key < $1.key }.map {
+            "\($0.key)=\($0.value.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+    }
+
+    /// What Save sends: every name typed, and an empty one for each voice whose
+    /// stored name was wiped from its field. A voice with no stored name and an
+    /// empty field has nothing to remove and is left out.
+    nonisolated static func namesToSend(drafts: [String: String],
+                                        stored: [String: String]) -> [String: String] {
+        var send: [String: String] = [:]
+        for (label, draft) in drafts {
+            let name = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                send[label] = name
+            } else if !(stored[label] ?? "").isEmpty {
+                send[label] = ""
+            }
+        }
+        return send
+    }
+
     private func launch(_ args: [String], on file: URL, startingPhase: Phase,
                         onFinish: ((Outcome) -> Void)? = nil) {
         isRunning = true
         wasCancelled = false
         errorText = nil
+        failureReason = nil
         log.removeAll()
         lastPublish = .distantPast
-        residue = ""
         phase = startingPhase
         live.reset(to: startingPhase)
 
@@ -243,33 +289,40 @@ final class Engine: ObservableObject {
         // progress output is far more than that, and a child process whose stdout is
         // full blocks forever. Draining stdout is not about showing it. It is what
         // keeps a long transcription from hanging.
-        let onData: @Sendable (FileHandle) -> Void = { [weak self] handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty, let text = String(data: chunk, encoding: .utf8) else { return }
-            Task { @MainActor in self?.ingest(text) }
+        //
+        // One reader per pipe, each with its own bytes and its own half line. They
+        // shared one buffer once: a line half written on stdout was glued in front
+        // of the next thing to arrive on stderr, and the marker that carries the
+        // reason a run failed, no longer at the start of its line, was not
+        // recognised.
+        let outReader = PipeReader(outPipe.fileHandleForReading)
+        let errReader = PipeReader(errPipe.fileHandleForReading)
+        for reader in [outReader, errReader] {
+            reader.handle.readabilityHandler = { [weak self] handle in
+                let (lines, ended) = reader.readLines()
+                // Nothing more will come, and a handler left in place is called
+                // again at once, for ever, until somebody removes it.
+                if ended { handle.readabilityHandler = nil }
+                guard !lines.isEmpty else { return }
+                Task { @MainActor in self?.ingest(lines) }
+            }
         }
-        outPipe.fileHandleForReading.readabilityHandler = onData
-        errPipe.fileHandleForReading.readabilityHandler = onData
 
         proc.terminationHandler = { [weak self] p in
-            // Whatever arrived after the last callback. The reason a run failed is
-            // usually in the final few lines, and they were being dropped.
-            let tail = (try? outPipe.fileHandleForReading.readToEnd()).flatMap { $0 }
-            let errTail = (try? errPipe.fileHandleForReading.readToEnd()).flatMap { $0 }
+            // Whatever arrived after the last callback, and the line that had no
+            // newline yet. The reason a run failed is usually in the final few
+            // lines, and they were being dropped.
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            let tail = outReader.finish() + errReader.finish()
             Task { @MainActor in
-                outPipe.fileHandleForReading.readabilityHandler = nil
-                errPipe.fileHandleForReading.readabilityHandler = nil
                 // Stop, then start again straight away, and this handler belongs
                 // to the process that was killed. Letting it run marked the new
                 // run as failed and cleared the state out from under it; letting
                 // it read its tail first wrote the killed run's last line into
                 // the new run's progress.
                 guard self?.process == nil || self?.process === p else { return }
-                for data in [tail, errTail] {
-                    if let data, let text = String(data: data, encoding: .utf8) {
-                        self?.ingest(text + "\n")
-                    }
-                }
+                self?.ingest(tail)
                 self?.isRunning = false
                 self?.process = nil
                 if self?.wasCancelled == true {
@@ -277,6 +330,7 @@ final class Engine: ObservableObject {
                     self?.phase = .idle
                     self?.live.reset(to: .idle)
                     self?.errorText = nil
+                    self?.failureReason = nil
                     onFinish?(.cancelled)
                     return
                 }
@@ -288,8 +342,10 @@ final class Engine: ObservableObject {
                     self?.phase = .failed
                     // Always something. The old version tested for nil, and an
                     // empty log produced an empty string, so the alert came up
-                    // with a title, a Close button and no text at all.
-                    if (self?.errorText ?? "").isEmpty {
+                    // with a title, a Close button and no text at all. Not when
+                    // the engine gave its reason: the alert was up with it, and
+                    // closing it is not a reason to raise a worse one now.
+                    if self?.failureReason == nil, (self?.errorText ?? "").isEmpty {
                         let tail = self?.log.suffix(6).joined(separator: "\n") ?? ""
                         self?.errorText = tail.isEmpty
                             ? "The engine exited with code \(p.terminationStatus) and said nothing."
@@ -306,7 +362,9 @@ final class Engine: ObservableObject {
         } catch {
             isRunning = false
             phase = .failed
-            errorText = "Cannot launch Python at \(Self.pythonPath): \(error.localizedDescription)"
+            let why = "Cannot launch Python at \(Self.pythonPath): \(error.localizedDescription)"
+            errorText = why
+            failureReason = why
             onFinish?(.failed)
         }
     }
@@ -320,6 +378,7 @@ final class Engine: ObservableObject {
         phase = .idle
         live.reset(to: .idle)
         errorText = nil
+        failureReason = nil
     }
 
     /// Kill the child before the app goes away.
@@ -327,38 +386,60 @@ final class Engine: ObservableObject {
     /// A terminated app leaves its subprocess running: whisper carries on with
     /// the whole processor busy and no window left to explain what is using it.
     /// Somebody who quits an app has already said what they want.
+    ///
+    /// Counted as a stop the person asked for. The app can stay alive a moment
+    /// longer while it closes a recording, and the run ending then looked like a
+    /// failure: the queue marked the row failed and, in a batch, started the next
+    /// recording with nobody left to stop it.
     func terminateChild() {
-        process?.terminate()
+        guard let p = process else { return }
+        wasCancelled = true
+        p.terminate()
         process = nil
     }
 
-    private func ingest(_ chunk: String) {
-        // A pipe hands over bytes, not lines. Splitting the chunk as if it were
-        // lines cut one in half wherever the boundary fell, and the half that
-        // carried the phase prefix was lost: a stage that takes minutes never
-        // ticked. Whatever comes after the last newline waits for the next chunk.
-        let combined = residue + chunk
-        let lastBreak = combined.lastIndex(of: "\n")
-        let text: String
-        if let lastBreak {
-            text = String(combined[..<lastBreak])
-            residue = String(combined[combined.index(after: lastBreak)...])
+    /// The reason a line carries, if it is the engine saying why a run failed.
+    ///
+    /// Matched against a marker the engine emits, not against its wording.
+    /// The previous version looked for a phrase from the human message and
+    /// stopped working the day that sentence was rephrased. It broke silently,
+    /// on a path no test covers. Keep this in step with ERR_NO_TOKEN and
+    /// ERR_MARK in pipeline.py. A missing token prints both markers on one
+    /// line, the token one inside the error one, so it is checked first and
+    /// both come out.
+    nonisolated static func failureReason(inLine line: String) -> String? {
+        let reason: String
+        if line.contains(errNoToken) {
+            reason = line.replacingOccurrences(of: errNoToken, with: "")
+                .replacingOccurrences(of: errMark, with: "")
+        } else if let mark = line.range(of: errMark) {
+            // Not only at the start of the line: a progress bar redrawn with a
+            // carriage return and no newline left the marker behind it.
+            reason = String(line[mark.upperBound...])
         } else {
-            residue = combined
-            // Nothing complete yet. A single line longer than this is the engine
-            // printing a progress bar with no newline, so do not hold it for ever.
-            guard residue.count > 4096 else { return }
-            text = residue
-            residue = ""
+            return nil
         }
+        let trimmed = reason.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
+    /// Lines, whole ones, from either pipe. Cutting the bytes into lines is the
+    /// reader's job (PipeReader), so a line arrives here complete and in one
+    /// piece however the operating system happened to hand it over.
+    private func ingest(_ lines: [String]) {
         var newestPhase: Phase?
         var newestLine: String?
         var newestProgress: Double?
 
-        for line in text.split(separator: "\n").map(String.init) {
+        for line in lines {
             let clean = line.trimmingCharacters(in: .whitespaces)
             guard !clean.isEmpty else { continue }
+            // Before the noise filter below: a reason that happens to quote a
+            // library's warning must not be thrown away with the warnings.
+            if let reason = Engine.failureReason(inLine: clean) {
+                failureReason = reason
+                errorText = reason
+            }
             // The libraries underneath (torch, speechbrain, lightning) are noisy and print
             // warnings that have nothing to do with the user. Filtering them here instead
             // of showing them is the difference between a readable log and a wall of text.
@@ -371,18 +452,6 @@ final class Engine: ObservableObject {
                 newestProgress = pct
             } else {
                 newestLine = clean
-            }
-            // Matched against a marker the engine emits, not against its wording.
-            // The previous version looked for a phrase from the human message and
-            // stopped working the day that sentence was rephrased. It broke silently,
-            // on a path no test covers. Keep this in step with ERR_NO_TOKEN in pipeline.py.
-            if clean.contains(Engine.errNoToken) {
-                errorText = clean.replacingOccurrences(of: Engine.errNoToken, with: "")
-                    .replacingOccurrences(of: Engine.errMark, with: "")
-                    .trimmingCharacters(in: .whitespaces)
-            } else if clean.hasPrefix(Engine.errMark) {
-                errorText = String(clean.dropFirst(Engine.errMark.count))
-                    .trimmingCharacters(in: .whitespaces)
             }
         }
         if log.count > 400 { log.removeFirst(log.count - 400) }
@@ -577,5 +646,99 @@ final class Engine: ObservableObject {
             )
         }
         .sorted { $0.speechSeconds > $1.speechSeconds }
+    }
+}
+
+// MARK: - reading the pipes
+
+/// Bytes from one pipe, cut into the lines they hold.
+///
+/// A pipe hands over bytes, not lines, and not even whole characters: a read can
+/// end in the middle of a three-byte character. The chunk used to be decoded as
+/// it came and thrown away whole when that failed, taking with it whatever else
+/// it held, which could be the line that says why the run failed. A newline byte
+/// never occurs inside a multi-byte UTF-8 character, so cutting at newlines
+/// first and decoding afterwards loses nothing. A carriage return ends a line as
+/// well: a progress bar that redraws itself is a stream of them.
+struct LineBuffer {
+    private var pending = Data()
+
+    /// A single line longer than this is a progress bar printing with no
+    /// newline, so it is not held for ever.
+    static let longestLine = 4096
+
+    /// Takes the next bytes and returns the lines they completed.
+    mutating func append(_ data: Data) -> [String] {
+        pending.append(data)
+        var lines: [String] = []
+        var start = 0
+        let bytes = [UInt8](pending)
+        for (i, byte) in bytes.enumerated() where byte == 0x0A || byte == 0x0D {
+            lines.append(Self.text(bytes[start..<i]))
+            start = i + 1
+        }
+        var rest = Array(bytes[start...])
+        if rest.count > Self.longestLine {
+            let cut = Self.wholeCharacters(in: rest)
+            lines.append(Self.text(rest[..<cut]))
+            rest.removeFirst(cut)
+        }
+        pending = Data(rest)
+        return lines
+    }
+
+    /// The line that never got its newline, at the end of the stream.
+    mutating func finish() -> [String] {
+        defer { pending = Data() }
+        return pending.isEmpty ? [] : [Self.text([UInt8](pending)[...])]
+    }
+
+    /// Lossy on purpose: a byte that is not UTF-8 becomes a replacement
+    /// character and the rest of the line survives.
+    private static func text(_ bytes: ArraySlice<UInt8>) -> String {
+        String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// How many leading bytes end on a character boundary: a character cut by
+    /// the end of the data stays behind for the next read.
+    private static func wholeCharacters(in bytes: [UInt8]) -> Int {
+        var end = bytes.count
+        var tail = 0
+        while end > 0, tail < 3, bytes[end - 1] & 0xC0 == 0x80 {
+            end -= 1
+            tail += 1
+        }
+        guard end > 0 else { return bytes.count }
+        let lead = bytes[end - 1]
+        let expected = lead >= 0xF0 ? 3 : lead >= 0xE0 ? 2 : lead >= 0xC0 ? 1 : 0
+        return expected > tail ? end - 1 : bytes.count
+    }
+}
+
+/// One pipe of the child process, read on whichever thread asks.
+///
+/// The read and the cutting into lines happen under one lock, so the termination
+/// handler reading what is left cannot overtake a read that is still being
+/// handed on, and the line a chunk ended in the middle of is completed by the
+/// next chunk of the same pipe and no other.
+final class PipeReader: @unchecked Sendable {
+    let handle: FileHandle
+    private let lock = NSLock()
+    private var buffer = LineBuffer()
+
+    init(_ handle: FileHandle) { self.handle = handle }
+
+    /// What is there now, as whole lines, and whether the stream has ended.
+    func readLines() -> (lines: [String], ended: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        let chunk = handle.availableData
+        return (buffer.append(chunk), chunk.isEmpty)
+    }
+
+    /// Everything left, down to the last line without a newline.
+    func finish() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let rest = (try? handle.readToEnd()).flatMap { $0 } ?? Data()
+        return buffer.append(rest) + buffer.finish()
     }
 }

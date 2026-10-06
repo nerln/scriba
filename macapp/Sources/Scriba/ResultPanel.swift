@@ -18,6 +18,9 @@ struct ResultPanel: View {
     @State private var drafts: [String: String] = [:]
     @State private var player: AVAudioPlayer?
     @State private var playing: String?
+    /// Why the voices cannot be played, when they cannot. The play button used to
+    /// fail without a word.
+    @State private var listenProblem: String?
 
     var body: some View {
         ScrollView {
@@ -35,7 +38,10 @@ struct ResultPanel: View {
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .onAppear(perform: seedDrafts)
+        .onAppear {
+            seedDrafts()
+            checkAudio()
+        }
         .onChange(of: engine.speakers) { _, _ in seedDrafts() }
     }
 
@@ -75,6 +81,14 @@ struct ResultPanel: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Who is speaking").font(.headline)
 
+            // Said above the voices, where the buttons that do nothing are.
+            if let problem = listenProblem {
+                Label(problem, systemImage: "speaker.slash")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             ForEach(engine.speakers) { s in
                 SpeakerRow(
                     speaker: s,
@@ -83,6 +97,7 @@ struct ResultPanel: View {
                         set: { drafts[s.id] = $0 }
                     ),
                     isPlaying: playing == s.id,
+                    listenProblem: listenProblem,
                     onPlay: { play(s) }
                 )
             }
@@ -96,7 +111,7 @@ struct ResultPanel: View {
 
             Button {
                 guard let f = file else { return }
-                engine.applyNames(file: f, mapping: drafts, enroll: enrollOnSave) { _ in
+                engine.applyNames(file: f, mapping: namesToSend, enroll: enrollOnSave) { _ in
                     // The sidebar row carries the names. Without this it kept
                     // showing the old ones, or none, for the rest of the session.
                     NotificationCenter.default.post(name: .scribaRefresh, object: nil)
@@ -106,7 +121,7 @@ struct ResultPanel: View {
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
-            .disabled(engine.isRunning || drafts.values.allSatisfy(\.isEmpty))
+            .disabled(engine.isRunning || namesToSend.isEmpty)
         }
     }
 
@@ -175,18 +190,41 @@ struct ResultPanel: View {
 
     // MARK: - actions
 
+    /// What Save sends: the names typed, and an empty name for each voice whose
+    /// stored name was cleared, which is how a name is taken back. With every
+    /// field empty and nothing stored there is nothing to save.
+    private var namesToSend: [String: String] {
+        Engine.namesToSend(drafts: drafts, stored: info.state.names ?? [:])
+    }
+
     private func seedDrafts() {
         for s in engine.speakers where drafts[s.id] == nil {
             drafts[s.id] = s.name
         }
     }
 
+    /// The job's 16 kHz WAV is what the voices are played from, and
+    /// `scriba jobs prune --audio` deletes it to give the disk space back.
+    private func checkAudio() {
+        listenProblem = FileManager.default.fileExists(atPath: info.audio) ? nil : Self.prunedAudio
+    }
+
+    static let prunedAudio = "The audio of this recording was removed to save space "
+        + "(scriba jobs prune --audio), so there is nothing to play here. Listen to the "
+        + "original recording before naming a voice."
+
     /// Plays the longest stretch of this voice. The job's 16 kHz WAV is already
     /// there, so there is no need to decode the original again.
     private func play(_ s: Speaker) {
         player?.stop()
         if playing == s.id { playing = nil; return }
-        guard let p = try? AVAudioPlayer(contentsOf: URL(fileURLWithPath: info.audio)) else { return }
+        checkAudio()
+        guard listenProblem == nil else { return }
+        guard let p = try? AVAudioPlayer(contentsOf: URL(fileURLWithPath: info.audio)) else {
+            listenProblem = "The audio of this recording could not be opened, so there is "
+                + "nothing to play here. Listen to the original recording before naming a voice."
+            return
+        }
         player = p
         p.currentTime = s.previewStart
         p.play()
@@ -204,17 +242,21 @@ struct SpeakerRow: View {
     let speaker: Speaker
     @Binding var name: String
     let isPlaying: Bool
+    /// Why the button will not play, when it will not: it says so on hover and
+    /// looks muted, instead of looking like every other play button.
+    let listenProblem: String?
     let onPlay: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Button(action: onPlay) {
-                    Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
+                    Image(systemName: listenProblem != nil ? "speaker.slash.circle"
+                          : isPlaying ? "stop.circle.fill" : "play.circle.fill")
                         .font(.title2)
                 }
                 .buttonStyle(.plain)
-                .help("Listen to the longest stretch of speech from this voice")
+                .help(listenProblem ?? "Listen to the longest stretch of speech from this voice")
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(Speaker.label(for: speaker.id))
