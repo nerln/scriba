@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
-from scriba import export
+from scriba import audio, export
 from scriba.export import (
     FILENAMES,
     _sweep,
@@ -44,18 +45,20 @@ def turn(speaker, start, text, confidence=None, end=None):
     return t
 
 
-def transcript_lines(doc: str) -> list[str]:
+def transcript_lines(doc: str, language: str = "en") -> list[str]:
     """The lines of the Transcript section that carry a spoken turn."""
-    body = doc.split("## Transcript", 1)[1]
-    body = body.split("## Turns to check", 1)[0]
+    w = export.words(language)
+    body = doc.split(f"## {w['transcript']}", 1)[1]
+    body = body.split(f"## {w['to_check']}", 1)[0]
     return [ln for ln in body.splitlines() if ln.startswith("**")]
 
 
-def check_lines(doc: str) -> list[str]:
+def check_lines(doc: str, language: str = "en") -> list[str]:
     """The bullet lines of the "Turns to check" section."""
-    if "## Turns to check" not in doc:
+    heading = f"## {export.words(language)['to_check']}"
+    if heading not in doc:
         return []
-    body = doc.split("## Turns to check", 1)[1]
+    body = doc.split(heading, 1)[1]
     return [ln for ln in body.splitlines() if ln.startswith("- [")]
 
 
@@ -220,11 +223,18 @@ def test_source_doc_date_is_plain_when_no_source_is_declared(conversation):
 
 
 def test_source_doc_date_flags_a_filesystem_timestamp(conversation):
+    # The value the engine stores (audio.recorded_at), not a word of this test's own.
     doc = source_doc(conversation, title="T", recorded=datetime(2026, 3, 4, 9, 30),
-                     recorded_source="modification")
+                     recorded_source="file modified")
     assert "2026-03-04 09:30" in doc
     assert "from the file's modification time" in doc
     assert "may not be when the conversation happened" in doc
+
+
+def test_source_doc_date_from_a_birth_time_says_creation(conversation):
+    doc = source_doc(conversation, title="T", recorded=datetime(2026, 3, 4, 9, 30),
+                     recorded_source="file created")
+    assert "from the file's creation time" in doc
 
 
 def test_source_doc_omits_the_date_when_there_is_none(conversation):
@@ -239,8 +249,17 @@ def test_source_doc_duration_always_shows_hours(conversation):
 
 
 def test_source_doc_reports_language(conversation):
-    assert "- **Language**: it" in source_doc(conversation, title="T")
-    assert "- **Language**: es" in source_doc(conversation, title="T", language="es")
+    # The label follows the language of the document and the value never does: it is
+    # the code another program reads.
+    assert "- **Lingua**: it" in source_doc(conversation, title="T", language="it")
+    assert "- **Idioma**: es" in source_doc(conversation, title="T", language="es")
+    assert "- **Language**: de" in source_doc(conversation, title="T", language="de")
+
+
+def test_source_doc_without_a_language_is_written_in_english(conversation):
+    doc = source_doc(conversation, title="T")
+    assert "- **Language**: en" in doc
+    assert "## Overview" in doc and "## Transcript" in doc
 
 
 def test_source_doc_source_file_and_device_are_optional(conversation):
@@ -551,8 +570,8 @@ def job(conversation, segments):
             "language": "it",
             "source_file": "nota vocale.m4a",
             "speaker_stats": {"SPEAKER_00": 60.0, "SPEAKER_01": 35.0},
-            "unresolved": ["Voice 2"],
-            "recorded_source": "modification",
+            "unresolved": ["Voce 2"],
+            "recorded_source": "file modified",
             "device": "Registratore da tasca",
         },
         "matches": [{"label": "SPEAKER_00", "score": 0.81}],
@@ -589,8 +608,20 @@ def test_write_all_creates_the_output_directory(tmp_path, job):
 
 
 def test_write_all_source_file_holds_the_source_document(tmp_path, job):
+    # The job is an Italian one, so the words around the text are Italian.
     path = write_all(tmp_path, STEM, ["source"], **job)[0]
     text = path.read_text()
+    assert text.startswith("# Riunione di redazione")
+    assert "- **Data**: 2026-03-04 09:30 (dall'ora di modifica del file" in text
+    assert "- **Durata**: 00:01:35" in text
+    assert "- **Registrato con**: Registratore da tasca" in text
+    assert "- **Voci non identificate**: Voce 2." in text
+    assert "**Voce 2 (non identificata) (attribuzione incerta)** [00:05]: Fai pure." in text
+
+
+def test_write_all_source_file_in_english_for_an_english_job(tmp_path, job):
+    job["meta"].update(language="en", unresolved=["Voice 2"])
+    text = write_all(tmp_path, STEM, ["source"], **job)[0].read_text()
     assert text.startswith("# Riunione di redazione")
     assert "- **Date**: 2026-03-04 09:30 (from the file's modification time" in text
     assert "- **Duration**: 00:01:35" in text
@@ -712,3 +743,488 @@ def test_write_all_validates_formats_before_deleting_anything(tmp_path, job):
 def test_module_exposes_the_expected_format_names():
     assert set(FILENAMES) == {"source", "md", "txt", "srt", "vtt", "json"}
     assert export.FILENAMES["source"].format(stem="X") == "X (source).md"
+
+
+# --------------------------------------------------------------------------- #
+# the words around the text follow the language of the recording
+# --------------------------------------------------------------------------- #
+#
+# An Italian recording used to come out under "Overview" and "Participants". The
+# headings, the labels, the markers and the sentences the exporter writes itself are
+# now in the language of the job, for Italian, Spanish and English, and English for
+# any other. What the app and other programs read stays as it was: the file names,
+# the JSON keys, the SRT and VTT structure, and the language code in the header.
+
+LANGUAGES = ["en", "it", "es"]
+
+
+def shaky_conversation(language):
+    """Every optional line of the header, and every kind of marker, in one document."""
+    turns = [
+        turn("SPEAKER_00", 0.0, "Comincio io.", 0.97),
+        turn("SPEAKER_01", 5.0, "Fai pure.", 0.41),
+        turn("SPEAKER_02", 9.0, "Anch'io.", 0.45),
+        turn("SPEAKER_00", 12.0, "Il punto e' la scadenza."),
+        turn(None, 20.0, "(rumore di fondo)", 0.99),
+    ]
+    names = {"SPEAKER_00": "Ada Verdolini"}
+    return source_doc(
+        turns, title="Lake trip", names=names, language=language,
+        recorded=datetime(2026, 3, 4, 9, 30), recorded_source="file modified",
+        duration=95.0, source_file="lake.m4a", device="Pocket recorder",
+        speaker_stats={"SPEAKER_00": 620.0, "SPEAKER_01": 95.0, "SPEAKER_02": 40.0},
+        unresolved=[display("SPEAKER_01", names, language),
+                    display("SPEAKER_02", names, language)],
+        untranscribed_seconds=42.0, speech_seconds=300.0,
+        untranscribed_gaps=[[10.0, 25.0], [100.0, 112.0]],
+    )
+
+
+def line_starting(doc, prefix):
+    return next(ln for ln in doc.splitlines() if ln.startswith(prefix))
+
+
+@pytest.mark.parametrize("code,heading", [
+    ("en", "Overview"), ("it", "Panoramica"), ("es", "Visión general"),
+    # Case and region are what a person types or a tool reports.
+    ("IT", "Panoramica"), ("it-IT", "Panoramica"), ("it_IT", "Panoramica"),
+    ("ES-mx", "Visión general"), (" es ", "Visión general"), ("EN", "Overview"),
+])
+def test_words_find_the_table_for_a_language_code(code, heading):
+    assert export.words(code)["overview"] == heading
+
+
+@pytest.mark.parametrize("code", ["de", "fr", "pt", "zh", "auto", "", None, "xx-YY"])
+def test_words_fall_back_to_english_for_anything_else(code):
+    assert export.words(code) is export.words("en")
+
+
+def test_every_language_has_every_string_with_the_same_blanks():
+    # A string missing from one table raises KeyError at export time, after the
+    # transcription was paid for. A blank that differs (a {n} in one language and
+    # none in another) raises the same way or silently drops the figure.
+    import re
+    blanks = lambda text: sorted(re.findall(r"\{(\w+)\}", text))
+    english = export._WORDS["en"]
+    for code in LANGUAGES:
+        table = export._WORDS[code]
+        assert set(table) == set(english), code
+        for key, text in table.items():
+            assert text.strip(), (code, key)
+            assert blanks(text) == blanks(english[key]), (code, key)
+            assert "—" not in text, (code, key)
+
+
+def test_only_the_three_languages_are_in_the_table():
+    assert sorted(export._WORDS) == sorted(LANGUAGES)
+
+
+# ---- the voice names
+
+@pytest.mark.parametrize("code,first,none", [
+    ("en", "Voice 1", "Unattributed"),
+    ("it", "Voce 1", "Non attribuito"),
+    ("es", "Voz 1", "Sin atribuir"),
+])
+def test_display_names_the_voice_in_the_language(code, first, none):
+    assert display("SPEAKER_00", None, code) == first
+    assert display(None, None, code) == none
+    assert display(None, {"SPEAKER_00": "Ada Verdolini"}, code) == none
+
+
+def test_display_counts_from_one_in_every_language():
+    assert display("SPEAKER_09", None, "it") == "Voce 10"
+    assert display("SPEAKER_01", {}, "es") == "Voz 2"
+
+
+def test_display_a_name_or_an_odd_label_is_never_translated():
+    names = {"SPEAKER_00": "Ada Verdolini"}
+    for code in LANGUAGES:
+        assert display("SPEAKER_00", names, code) == "Ada Verdolini"
+        assert display("SPEAKER_XY", None, code) == "SPEAKER_XY"
+        assert display("intervistatore", None, code) == "intervistatore"
+
+
+def test_display_without_a_language_is_english():
+    assert display("SPEAKER_00", None) == "Voice 1"
+    assert display("SPEAKER_00", None, "de") == "Voice 1"
+
+
+# ---- the source document, in each language
+
+def test_italian_document_has_italian_headings_and_labels():
+    doc = shaky_conversation("it")
+    for heading in ("## Panoramica", "## Trascrizione", "## Turni da verificare"):
+        assert heading in doc
+    assert "- **Data**: 2026-03-04 09:30 (dall'ora di modifica del file, che può non " \
+           "coincidere con il momento della conversazione)" in doc
+    assert "- **Durata**: 00:01:35" in doc
+    assert "- **Lingua**: it" in doc
+    assert "- **File di origine**: lake.m4a" in doc
+    assert "- **Registrato con**: Pocket recorder" in doc
+    assert ("- **Partecipanti**: Ada Verdolini (10:20 di parlato), "
+            "Voce 2 (01:35 di parlato), Voce 3 (00:40 di parlato)") in doc
+    assert line_starting(doc, "- **Voci non identificate**").startswith(
+        "- **Voci non identificate**: Voce 2, Voce 3. Persone distinte. I loro nomi "
+        "non vengono mai pronunciati nella registrazione. Non indovinare chi siano.")
+    assert line_starting(doc, "- **Attribuzione**").startswith(
+        "- **Attribuzione**: 2 turni su 5 sono segnati come *(attribuzione incerta)*.")
+    assert line_starting(doc, "- **Non trascritto**").startswith(
+        "- **Non trascritto**: 00:42 dei 05:00 di parlato di questa registrazione")
+    assert line_starting(doc, "- **Nota**").startswith("- **Nota**: questo è riconoscimento")
+    assert transcript_lines(doc, "it") == [
+        "**Ada Verdolini** [00:00]: Comincio io.",
+        "**Voce 2 (non identificata) (attribuzione incerta)** [00:05]: Fai pure.",
+        "**Voce 3 (non identificata) (attribuzione incerta)** [00:09]: Anch'io.",
+        "**Ada Verdolini** [00:12]: Il punto e' la scadenza.",
+        "**Non attribuito** [00:20]: (rumore di fondo)",
+    ]
+    assert check_lines(doc, "it") == [
+        "- [00:05] Voce 2 (non identificata): Fai pure.",
+        "- [00:09] Voce 3 (non identificata): Anch'io.",
+    ]
+
+
+def test_spanish_document_has_spanish_headings_and_labels():
+    doc = shaky_conversation("es")
+    for heading in ("## Visión general", "## Transcripción", "## Turnos por revisar"):
+        assert heading in doc
+    assert "- **Fecha**: 2026-03-04 09:30 (de la hora de modificación del archivo, que " \
+           "puede no coincidir con el momento de la conversación)" in doc
+    assert "- **Duración**: 00:01:35" in doc
+    assert "- **Idioma**: es" in doc
+    assert "- **Archivo de origen**: lake.m4a" in doc
+    assert "- **Grabado con**: Pocket recorder" in doc
+    assert ("- **Participantes**: Ada Verdolini (10:20 de habla), "
+            "Voz 2 (01:35 de habla), Voz 3 (00:40 de habla)") in doc
+    assert line_starting(doc, "- **Voces no identificadas**").startswith(
+        "- **Voces no identificadas**: Voz 2, Voz 3. Personas distintas. Sus nombres "
+        "no se dicen nunca en la grabación. No adivines quiénes son.")
+    assert line_starting(doc, "- **Atribución**").startswith(
+        "- **Atribución**: 2 turnos de 5 están marcados como *(atribución incierta)*.")
+    assert line_starting(doc, "- **No transcrito**").startswith(
+        "- **No transcrito**: 00:42 de los 05:00 de habla de esta grabación")
+    assert line_starting(doc, "- **Nota**").startswith("- **Nota**: esto es reconocimiento")
+    assert transcript_lines(doc, "es") == [
+        "**Ada Verdolini** [00:00]: Comincio io.",
+        "**Voz 2 (no identificada) (atribución incierta)** [00:05]: Fai pure.",
+        "**Voz 3 (no identificada) (atribución incierta)** [00:09]: Anch'io.",
+        "**Ada Verdolini** [00:12]: Il punto e' la scadenza.",
+        "**Sin atribuir** [00:20]: (rumore di fondo)",
+    ]
+    assert check_lines(doc, "es") == [
+        "- [00:05] Voz 2 (no identificada): Fai pure.",
+        "- [00:09] Voz 3 (no identificada): Anch'io.",
+    ]
+
+
+def test_english_document_is_the_one_it_always_was():
+    doc = shaky_conversation("en")
+    assert "## Overview" in doc and "## Transcript" in doc and "## Turns to check" in doc
+    assert "- **Date**: 2026-03-04 09:30 (from the file's modification time, which may " \
+           "not be when the conversation happened)" in doc
+    assert "- **Participants**: Ada Verdolini (10:20 of speech), Voice 2 (01:35 of " \
+           "speech), Voice 3 (00:40 of speech)" in doc
+    assert "- **Attribution**: 2 of 5 turns are marked *(uncertain)*." in doc
+    assert "**Voice 2 (unidentified) (uncertain)** [00:05]: Fai pure." in doc
+    assert "**Unattributed** [00:20]: (rumore di fondo)" in doc
+
+
+@pytest.mark.parametrize("code", ["de", "auto", "", "pt-BR"])
+def test_a_document_in_another_language_is_in_english_and_keeps_its_code(code):
+    doc = shaky_conversation(code)
+    assert "## Overview" in doc and "## Transcript" in doc
+    assert "**Voice 2 (unidentified) (uncertain)** [00:05]: Fai pure." in doc
+    assert f"- **Language**: {code}" in doc
+
+
+@pytest.mark.parametrize("code", ["it", "es"])
+def test_no_english_words_are_left_in_a_translated_document(code):
+    doc = shaky_conversation(code)
+    english = export._WORDS["en"]
+    # The recording's own text is Italian whatever the document says, so only the
+    # words the exporter adds are looked for. Each English string must be gone.
+    for key in ("overview", "transcript", "to_check", "date", "duration", "language",
+                "source_file", "recorded_with", "participants", "unidentified_voices",
+                "attribution", "not_transcribed", "note", "unidentified", "uncertain",
+                "unattributed"):
+        assert english[key] not in doc, (code, key)
+    for sentence in ("Do not guess", "are marked", "never spoken", "automatic speech",
+                     "of speech", "going back to the audio", "The longest of these"):
+        assert sentence not in doc, (code, sentence)
+
+
+def test_the_document_has_the_same_shape_in_every_language():
+    # Translating must not move anything: the same lines in the same order, each of
+    # the same kind. A heading that lost its "## " or a bullet that lost its bold
+    # label would still read fine in a language the author cannot check.
+    def shape(doc):
+        return [("" if not ln else "title" if ln.startswith("# ") else "h2" if ln.startswith("## ")
+                 else "field" if ln.startswith("- **") else "turn" if ln.startswith("**")
+                 else "check" if ln.startswith("- [") else "text") for ln in doc.splitlines()]
+
+    english = shape(shaky_conversation("en"))
+    assert "text" in english and "check" in english and "field" in english
+    for code in ("it", "es", "de"):
+        assert shape(shaky_conversation(code)) == english, code
+
+
+@pytest.mark.parametrize("code", LANGUAGES)
+def test_the_uncertain_marker_in_the_header_is_the_one_on_the_lines(code):
+    # The header tells whatever reads the file what the marker means, so the two
+    # have to be spelled the same or the explanation points at nothing.
+    import re
+    doc = shaky_conversation(code)
+    header = line_starting(doc, "- **" + export.words(code)["attribution"] + "**")
+    marker = re.search(r"\*(\(.+?\))\*", header).group(1)
+    assert marker == export.words(code)["uncertain"]
+    marked = [ln for ln in transcript_lines(doc, code) if marker in ln]
+    assert len(marked) == 2
+    assert all(ln.startswith("**") and ln.split("**")[1].endswith(marker) for ln in marked)
+
+
+@pytest.mark.parametrize("code,one,many", [
+    ("en", "1 of 3 turns is marked", "2 of 3 turns are marked"),
+    ("it", "1 turno su 3 è segnato come", "2 turni su 3 sono segnati come"),
+    ("es", "1 turno de 3 está marcado como", "2 turnos de 3 están marcados como"),
+])
+def test_the_attribution_line_agrees_with_the_count(code, one, many):
+    word = export.words(code)["attribution"]
+    one_shaky = [turn("SPEAKER_00", 0, "Uno.", 0.3), turn("SPEAKER_00", 5, "Due."),
+                 turn("SPEAKER_00", 9, "Tre.")]
+    two_shaky = [turn("SPEAKER_00", 0, "Uno.", 0.3), turn("SPEAKER_00", 5, "Due.", 0.2),
+                 turn("SPEAKER_00", 9, "Tre.")]
+    assert one in line_starting(source_doc(one_shaky, title="T", language=code), f"- **{word}**")
+    assert many in line_starting(source_doc(two_shaky, title="T", language=code), f"- **{word}**")
+
+
+@pytest.mark.parametrize("code,one,many", [
+    ("en", "A distinct person. Their name is never spoken",
+     "Distinct people. Their names are never spoken"),
+    ("it", "Una persona distinta. Il suo nome non viene mai pronunciato",
+     "Persone distinte. I loro nomi non vengono mai pronunciati"),
+    ("es", "Una persona distinta. Su nombre no se dice nunca",
+     "Personas distintas. Sus nombres no se dicen nunca"),
+])
+def test_the_unidentified_line_agrees_with_the_count(conversation, code, one, many):
+    label = export.words(code)["unidentified_voices"]
+    single = source_doc(conversation, title="T", language=code,
+                        unresolved=[display("SPEAKER_01", None, code)])
+    pair = source_doc(conversation, title="T", language=code,
+                      unresolved=[display("SPEAKER_01", None, code),
+                                  display("SPEAKER_00", None, code)])
+    assert one in line_starting(single, f"- **{label}**")
+    assert many in line_starting(pair, f"- **{label}**")
+
+
+@pytest.mark.parametrize("code,total,where", [
+    ("en", "00:42 of the 05:00 of speech", "The longest of these start at 00:10, 01:40."),
+    ("it", "00:42 dei 05:00 di parlato", "I più lunghi iniziano a 00:10, 01:40."),
+    ("es", "00:42 de los 05:00 de habla", "Los más largos empiezan en 00:10, 01:40."),
+])
+def test_the_not_transcribed_line_says_how_much_and_where(code, total, where):
+    label = export.words(code)["not_transcribed"]
+    gaps = [[10.0, 25.0], [100.0, 112.0]]
+    with_gaps = source_doc([turn("SPEAKER_00", 0, "Ciao.")], title="T", language=code,
+                           untranscribed_seconds=42.0, speech_seconds=300.0,
+                           untranscribed_gaps=gaps)
+    line = line_starting(with_gaps, f"- **{label}**")
+    assert total in line and line.endswith(where)
+
+    no_gaps = source_doc([turn("SPEAKER_00", 0, "Ciao.")], title="T", language=code,
+                         untranscribed_seconds=42.0, speech_seconds=300.0)
+    assert total in line_starting(no_gaps, f"- **{label}**")
+    assert where.split(" at ")[0].split(" a ")[0] not in line_starting(no_gaps, f"- **{label}**")
+
+    short = source_doc([turn("SPEAKER_00", 0, "Ciao.")], title="T", language=code,
+                       untranscribed_seconds=4.9, speech_seconds=300.0)
+    assert f"**{label}**" not in short
+
+
+@pytest.mark.parametrize("code,plain_date", [
+    ("en", "- **Date**: 2026-03-04 09:30"),
+    ("it", "- **Data**: 2026-03-04 09:30"),
+    ("es", "- **Fecha**: 2026-03-04 09:30"),
+])
+def test_the_date_says_where_it_came_from_in_every_language(code, plain_date):
+    when = datetime(2026, 3, 4, 9, 30)
+    kinds = {"en": ("creation", "modification"), "it": ("creazione", "modifica"),
+             "es": ("creación", "modificación")}[code]
+    # The recorder's own stamp is stated plainly.
+    for given in ("recorded", ""):
+        doc = source_doc([turn("SPEAKER_00", 0, "Ciao.")], title="T", language=code,
+                         recorded=when, recorded_source=given)
+        assert line_starting(doc, "- **").startswith(plain_date)
+        assert plain_date + " (" not in doc
+    # What the filesystem guessed is flagged, with the words for how it was guessed.
+    for source, kind in zip(("file created", "file modified"), kinds):
+        doc = source_doc([turn("SPEAKER_00", 0, "Ciao.")], title="T", language=code,
+                         recorded=when, recorded_source=source)
+        line = line_starting(doc, plain_date)
+        assert plain_date + " (" in line and kind in line
+        assert "file created" not in line and "file modified" not in line
+    # A source this module has no words for is written as it came, not lost.
+    doc = source_doc([turn("SPEAKER_00", 0, "Ciao.")], title="T", language=code,
+                     recorded=when, recorded_source="the scanner")
+    assert "the scanner" in line_starting(doc, plain_date)
+
+
+# The whole line, for every source the engine can store, in every language. A table
+# and not a loop over the translations: what has to be true is how each of them
+# reads, and that "file" is said once.
+DATE_LINES = [
+    ("en", "file created", "- **Date**: 2026-03-04 09:30 (from the file's creation "
+                           "time, which may not be when the conversation happened)"),
+    ("en", "file modified", "- **Date**: 2026-03-04 09:30 (from the file's modification "
+                            "time, which may not be when the conversation happened)"),
+    ("en", "the scanner", "- **Date**: 2026-03-04 09:30 (date taken from: the scanner; "
+                          "it may not be when the conversation happened)"),
+    ("it", "file created", "- **Data**: 2026-03-04 09:30 (dall'ora di creazione del "
+                           "file, che può non coincidere con il momento della "
+                           "conversazione)"),
+    ("it", "file modified", "- **Data**: 2026-03-04 09:30 (dall'ora di modifica del "
+                            "file, che può non coincidere con il momento della "
+                            "conversazione)"),
+    ("it", "the scanner", "- **Data**: 2026-03-04 09:30 (data ricavata da: the "
+                          "scanner; può non coincidere con il momento della "
+                          "conversazione)"),
+    ("es", "file created", "- **Fecha**: 2026-03-04 09:30 (de la hora de creación del "
+                           "archivo, que puede no coincidir con el momento de la "
+                           "conversación)"),
+    ("es", "file modified", "- **Fecha**: 2026-03-04 09:30 (de la hora de modificación "
+                            "del archivo, que puede no coincidir con el momento de la "
+                            "conversación)"),
+    ("es", "the scanner", "- **Fecha**: 2026-03-04 09:30 (fecha obtenida de: the "
+                          "scanner; puede no coincidir con el momento de la "
+                          "conversación)"),
+]
+
+
+@pytest.mark.parametrize("code,source,expected", DATE_LINES)
+def test_the_date_line_reads_whole_for_every_source_in_every_language(
+        code, source, expected):
+    doc = source_doc([turn("SPEAKER_00", 0, "Ciao.")], title="T", language=code,
+                     recorded=datetime(2026, 3, 4, 9, 30), recorded_source=source)
+    line = line_starting(doc, "- **" + export.words(code)["date"])
+    assert line == expected
+    # The value the state keeps never reaches the page, and "file" is not said twice:
+    # the old sentence read "from the file's file created time".
+    if source in export._FILE_TIME_KINDS:
+        assert source not in line
+    assert "file's file" not in line
+
+
+@pytest.mark.parametrize("code", ["en", "it", "es", "de"])
+def test_every_source_the_engine_can_store_has_its_own_words(code):
+    """Tied to audio.recorded_at itself, so a third source added there fails here.
+
+    Both filesystem branches are run for real, and what each returns goes into the
+    document. A source nobody wrote a word for would come out in the sentence meant
+    for the unknown, which names it as it came: a state value such as "file
+    created" on the page is exactly that.
+    """
+    when = datetime(2026, 3, 4, 9, 30)
+    born = SimpleNamespace(st_birthtime=when.timestamp(), st_mtime=when.timestamp())
+    only_modified = SimpleNamespace(st_mtime=when.timestamp())
+    seen = set()
+    for stat in (born, only_modified):
+        info = SimpleNamespace(created="", path=SimpleNamespace(stat=lambda s=stat: s))
+        recorded, source = audio.recorded_at(info)
+        seen.add(source)
+        doc = source_doc([turn("SPEAKER_00", 0, "Ciao.")], title="T", language=code,
+                         recorded=recorded, recorded_source=source)
+        line = line_starting(doc, "- **" + export.words(code)["date"])
+        assert source in export._FILE_TIME_KINDS
+        assert source not in line
+        assert export.words(code)["date_from_other"].split("{")[0] not in line
+    assert seen == {"file created", "file modified"}
+
+
+def test_a_translated_document_with_nothing_to_flag_is_still_whole():
+    turns = [turn("SPEAKER_00", 0.0, "Tutto chiaro.", 0.99)]
+    for code in ("it", "es"):
+        doc = source_doc(turns, title="T", language=code,
+                         names={"SPEAKER_00": "Ada Verdolini"})
+        assert doc.startswith("# T\n\n## " + export.words(code)["overview"])
+        assert transcript_lines(doc, code) == ["**Ada Verdolini** [00:00]: Tutto chiaro."]
+        assert export.words(code)["to_check"] not in doc
+        assert export.words(code)["attribution"] not in doc
+        assert "\n\n\n" not in doc
+
+
+# ---- the other formats
+
+@pytest.mark.parametrize("code,two,none", [
+    ("en", "Voice 2", "Unattributed"),
+    ("it", "Voce 2", "Non attribuito"),
+    ("es", "Voz 2", "Sin atribuir"),
+])
+def test_the_tool_formats_label_the_voices_in_the_language(conversation, segments,
+                                                            code, two, none):
+    names = {"SPEAKER_00": "Ada Verdolini"}
+    assert f"**{two}** [00:05]  \nFai pure." in markdown(conversation, names=names, language=code)
+    assert f"{none}: (rumore di fondo)" in plain(conversation, names=names, language=code)
+    assert f"[{two}] Fai pure.\n" in srt(segments, names=names, language=code)
+    assert f"<v {two}>Fai pure." in vtt(segments, names=names, language=code)
+
+
+def test_subtitles_keep_their_structure_in_every_language(segments):
+    # Only the label inside the brackets may differ. The numbering, the timecodes and
+    # the arrows are what a video editor parses.
+    def skeleton(text):
+        return [ln for ln in text.splitlines()
+                if "-->" in ln or ln.strip().isdigit() or ln in ("WEBVTT", "")]
+
+    for code in ("it", "es", "de"):
+        assert skeleton(srt(segments, language=code)) == skeleton(srt(segments))
+        assert skeleton(vtt(segments, language=code)) == skeleton(vtt(segments))
+    assert srt(segments, language="it").startswith("1\n00:00:00,000 --> 00:00:02,500\n")
+    assert vtt(segments, language="es").startswith("WEBVTT\n\n00:00:00.000 --> 00:00:02.500\n")
+
+
+# ---- write_all
+
+@pytest.mark.parametrize("code", ["en", "it", "es", "de"])
+def test_write_all_names_the_files_the_same_in_every_language(tmp_path, job, code):
+    # The app finds the document by "(source).md" and the folder is swept by name.
+    job["meta"]["language"] = code
+    written = write_all(tmp_path, STEM, ["source", "md", "txt", "srt", "vtt", "json"], **job)
+    assert [p.name for p in written] == [
+        f"{STEM} (source).md", f"{STEM}.md", f"{STEM}.txt", f"{STEM}.srt",
+        f"{STEM}.vtt", f"{STEM}.json"]
+
+
+@pytest.mark.parametrize("code,voice", [("en", "Voice 2"), ("it", "Voce 2"),
+                                        ("es", "Voz 2"), ("de", "Voice 2")])
+def test_write_all_gives_every_file_the_language_of_the_job(tmp_path, job, code, voice):
+    job["meta"]["language"] = code
+    job["meta"]["unresolved"] = [voice]
+    write_all(tmp_path, STEM, ["source", "md", "txt", "srt", "vtt"], **job)
+    for name in (f"{STEM} (source).md", f"{STEM}.md", f"{STEM}.txt",
+                 f"{STEM}.srt", f"{STEM}.vtt"):
+        text = (tmp_path / name).read_text()
+        assert voice in text, name
+        other = {"Voice 2", "Voce 2", "Voz 2"} - {voice}
+        assert not any(o in text for o in other), name
+
+
+def test_write_all_json_is_the_same_whatever_the_language(tmp_path, job):
+    # The keys, the raw speaker labels and the language code are for scripts.
+    payloads = {}
+    for code in LANGUAGES:
+        job["meta"]["language"] = code
+        folder = tmp_path / code
+        data = json.loads(write_all(folder, STEM, ["json"], **job)[0].read_text())
+        assert data["meta"]["language"] == code
+        assert sorted(data) == ["meta", "names", "segments", "speaker_matches", "turns"]
+        data["meta"].pop("language")
+        payloads[code] = data
+    assert payloads["it"] == payloads["en"] == payloads["es"]
+    assert {t["speaker"] for t in payloads["it"]["turns"]} == {"SPEAKER_00", "SPEAKER_01", None}
+
+
+def test_write_all_without_a_language_keeps_assuming_italian(tmp_path, job):
+    # The pipeline's own default when a job has no language recorded.
+    job["meta"].pop("language")
+    text = write_all(tmp_path, STEM, ["source"], **job)[0].read_text()
+    assert "## Panoramica" in text and "- **Lingua**: it" in text

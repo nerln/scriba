@@ -57,11 +57,17 @@ META = {
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="scriba-style-"))
 
-    written = export.write_all(
-        tmp, "team-sync", ["source", "md", "txt", "srt", "vtt"],
-        turns=TURNS, segments=TURNS, names=NAMES, meta=META,
-        matches=[{"speaker": k, **v} for k, v in MATCHES.items()],
-    )
+    # Once per language the documents are written in: the words scriba adds around the
+    # text are a table per language, and each table is as much output as the English.
+    written: list[Path] = []
+    for code in ("en", "it", "es"):
+        meta = {**META, "language": code,
+                "unresolved": [export.display("SPEAKER_02", NAMES, code)]}
+        written += export.write_all(
+            tmp, f"team-sync-{code}", ["source", "md", "txt", "srt", "vtt"],
+            turns=TURNS, segments=TURNS, names=NAMES, meta=meta,
+            matches=[{"speaker": k, **v} for k, v in MATCHES.items()],
+        )
 
     profiles = naming.build_profiles(TURNS, SPEECH, "en", MATCHES)
     briefing = tmp / "who-is-who.md"

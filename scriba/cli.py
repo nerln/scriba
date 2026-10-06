@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import asdict
 from enum import Enum
@@ -25,7 +26,12 @@ from .config import Settings, keychain_set, hf_token, DATA_DIR
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="Turns a recorded conversation into a document that says who "
                        "said what: transcribes, separates the voices, learns who is who.")
-console = Console()
+# Not wrapped when an application is reading the output (SCRIBA_MARKERS, set by the
+# macOS app). Writing to a pipe, rich has no terminal width to ask and cuts at 80
+# columns, so a failure's message and the "did not go through" line under it came
+# out as several fragments. The app, finding no marker line, showed the last
+# fragment as the reason: the tail of a sentence about memory allocations.
+console = Console(soft_wrap=bool(os.environ.get("SCRIBA_MARKERS")))
 
 
 class Stage(str, Enum):
@@ -84,7 +90,10 @@ def run(
             # memos overnight, hit an iCloud placeholder at position two, and the
             # other eight never ran. Each file stands on its own; the failures are
             # collected and repeated at the end so they are not scrolled away.
-            failures.append((f, _readable(e)))
+            # One line in the tally: it is the last thing in the log, and the
+            # app reads the log's tail when it finds no marker. A message with
+            # line breaks of its own left the tail as the end of a sentence.
+            failures.append((f, _one_line(_readable(e), type(e).__name__)))
             console.print(f"  {_readable(e)}", style="red", markup=False,
                           highlight=False)
             _mark_error(e)
@@ -124,11 +133,15 @@ def _run_one(f: Path, s, force, collection: str | None = None) -> None:
         table.add_row(label, name or "[yellow]unassigned[/yellow]", origin)
     console.print(table)
 
-    if res.unresolved:
+    # The labels `scriba name` takes. `res.unresolved` holds what the document
+    # calls those voices ("Voice 3", "Voce 3"), which the shell splits into two
+    # words and `name` then refuses.
+    unresolved = sorted(label for label in res.speakers if label not in res.names)
+    if unresolved:
         # Name the voices that are actually unresolved. The hint used to be
         # hardcoded to SPEAKER_00, which on a run where SPEAKER_00 was already
         # recognised told the reader to overwrite the name it had got right.
-        example = " ".join(f"{label}=Name" for label in sorted(res.unresolved))
+        example = " ".join(f"{label}=Name" for label in unresolved)
         console.print(f"\n  Unidentified voices. Read the briefing:\n"
                       f"  [cyan]{res.dossier_path}[/cyan]\n"
                       f"  then: [bold]scriba name \"{f.name}\" {example}[/bold]\n")
@@ -144,12 +157,37 @@ def name(
                                    help="Do not save the voice print in the voice registry"),
 ):
     """Assign names to the voices and learn them for the next recordings."""
+    try:
+        _name(file, assignments, no_enroll)
+    except typer.Exit:
+        raise  # said already, by _refuse. It is a RuntimeError, so it is named here.
+    except (FileNotFoundError, ValueError, RuntimeError, json.JSONDecodeError) as e:
+        # The line `run` prints. The app's Save found none here, so a refusal
+        # such as "already being transcribed" was explained from the tail of the
+        # log. The exception goes on to `main`, which says it in words and exits.
+        _mark_error(e)
+        raise
+
+
+def _refuse(*lines: str) -> typer.Exit:
+    """Say why a command cannot go on, for a person and for an application, then exit 1.
+
+    The first line in red and the others plain, as they were printed before. The
+    marker gets all of them on one line.
+    """
+    console.print(lines[0], style="red", markup=False, highlight=False)
+    for extra in lines[1:]:
+        console.print(extra, markup=False, highlight=False)
+    _mark_error(ValueError("\n".join(lines)))
+    return typer.Exit(1)
+
+
+def _name(file: Path, assignments: list[str], no_enroll: bool) -> None:
     from .pipeline import Job
     mapping: dict[str, str] = {}
     for a in assignments:
         if "=" not in a:
-            console.print(f"[red]invalid format: {a} (expected SPEAKER_00=Name)[/red]")
-            raise typer.Exit(1)
+            raise _refuse(f"invalid format: {a} (expected SPEAKER_00=Name)")
         k, v = a.split("=", 1)
         mapping[k.strip()] = v.strip()
 
@@ -164,12 +202,10 @@ def name(
     if known:
         unknown = [k for k in mapping if k not in known]
         if unknown:
-            console.print(f"[red]This recording has no {', '.join(unknown)}.[/red]")
-            console.print(f"Voices found: {', '.join(sorted(known))}")
-            raise typer.Exit(1)
+            raise _refuse(f"This recording has no {', '.join(unknown)}.",
+                          f"Voices found: {', '.join(sorted(known))}")
     else:
-        console.print("[red]This file has not been diarized yet. Run `scriba run` first.[/red]")
-        raise typer.Exit(1)
+        raise _refuse("This file has not been diarized yet. Run `scriba run` first.")
 
     res = job.set_names(mapping, enroll=not no_enroll)
     console.print(f"\n[green]Done.[/green] {res.job_dir / 'output'}")
@@ -817,15 +853,22 @@ def _mark_error(exc: BaseException) -> None:
     text is the raw message, marker and all, so the token marker inside it
     survives too: the app tells that failure apart from the others by it.
     """
-    import os
     from .pipeline import ERR_MARK
 
     if not os.environ.get("SCRIBA_MARKERS"):
         return
-    first = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
-    # Plain print, not the console: rich would wrap it, and a marker split over
-    # two lines is a marker nobody finds.
-    print(f"{ERR_MARK} {first}", flush=True)
+    # All of it, on one line. Only the first line used to be sent, and an
+    # exception that begins with a short heading ("could not load X:", then the
+    # cause underneath) reached the app as the heading and nothing else.
+    message = _one_line(str(exc), type(exc).__name__)
+    # Plain print, not the console: a marker split over two lines is a marker
+    # nobody finds, and this is the one line that must never be.
+    print(f"{ERR_MARK} {message}", flush=True)
+
+
+def _one_line(text: str, fallback: str = "") -> str:
+    """The text on one line: each line stripped, the empty ones dropped, a space between."""
+    return " ".join(line.strip() for line in text.splitlines() if line.strip()) or fallback
 
 
 def _readable(exc: BaseException) -> str:

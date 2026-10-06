@@ -700,6 +700,27 @@ def test_a_note_left_by_a_dead_process_counts_for_nothing(jobs_dir):
     assert jobs_mod.running_pid(row.path) is None
 
 
+@pytest.mark.skipif(not os.access("/bin/ps", os.X_OK), reason="no /bin/ps")
+def test_a_note_whose_pid_now_belongs_to_another_process_counts_for_nothing(jobs_dir):
+    # A Stop left the note, and the pid went to a process that started later. The
+    # job is whatever its files say, not "running" for as long as that one lives.
+    make_job(jobs_dir, "preso-0019", state={"source": "/audio/tredici.m4a"},
+             transcript=True,
+             extra={jobs_mod.RUNNING_NOTE: json.dumps(
+                 {"pid": os.getpid(), "process_started": "Mon Jan  1 00:00:00 2001"})})
+    row = jobs_mod.inventory()[0]
+    assert row.state == "text only"
+    assert jobs_mod.running_pid(row.path) is None
+
+
+@pytest.mark.skipif(not os.access("/bin/ps", os.X_OK), reason="no /bin/ps")
+def test_a_note_with_the_start_of_its_own_process_is_running(jobs_dir):
+    make_job(jobs_dir, "proprio-0020", state={"source": "/audio/quattordici.m4a"},
+             extra={jobs_mod.RUNNING_NOTE: json.dumps(
+                 {"pid": os.getpid(), "process_started": jobs_mod.process_start(os.getpid())})})
+    assert jobs_mod.inventory()[0].state == "running"
+
+
 def test_a_garbled_running_note_counts_for_nothing(jobs_dir):
     make_job(jobs_dir, "rotto-0013", state={"source": "/audio/dodici.m4a"},
              extra={jobs_mod.RUNNING_NOTE: "not json at all"})

@@ -7,12 +7,13 @@ here. Every deviation is commented, so it can be checked instead of taken on fai
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from .config import Settings
+from .config import Settings, write_atomic
 
 # Priming prompt: it shows whisper an example of the punctuation and accents we want.
 # This is not "prompt magic". It conditions the decoder on the right register
@@ -201,6 +202,7 @@ def transcribe(
     # Free the memory right away: large-v3 int8 takes ~1.6 GB, the alignment model
     # ~1.3 GB and pyannote another GB. On a 16 GB machine it is better not to keep
     # all three alive at once.
+    _unload_whisper(model)
     del model
     import gc
     gc.collect()
@@ -223,6 +225,7 @@ def transcribe(
             word_level = True
             del align_model
             gc.collect()
+            _empty_mps_cache()
         except Exception as exc:  # pragma: no cover - depends on the network
             # Alignment is an improvement, not a requirement: without it the
             # timestamps stay whisper's (coarser) ones and diarization works
@@ -230,6 +233,57 @@ def transcribe(
             print(f"[scriba] alignment failed ({exc}); continuing without word-level timestamps")
 
     return Transcript(segments=result["segments"], language=language, word_level=word_level)
+
+
+def _unload_whisper(model) -> None:
+    """Hand the decoder's device memory back before the aligner asks for its own.
+
+    `del model` only drops the Python reference. The weights go back when the C++
+    model behind it is destroyed, and a reference still held somewhere, or a
+    Metal buffer still in flight, delays that; this call asks for it outright.
+    The process this runs in ends soon after (see stage.py), so it is not what
+    rescues a long file. It lowers the peak between whisper and the aligner,
+    which on a 16 GB Mac is where the two overlapped. Best effort: a version
+    without the method, or a pipeline laid out differently, just skips it.
+    """
+    try:
+        model.model.model.unload_model()
+    except Exception:
+        pass
+
+
+def _empty_mps_cache() -> None:
+    """Let torch return what its Metal allocator is caching, after the aligner."""
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+
+def transcribe_to_file(wav: str, settings: dict[str, Any], out: str, *,
+                       report: Callable[[str], None]) -> None:
+    """The transcription stage as stage.call runs it: models in, transcript.json out.
+
+    Arguments and result are plain data because they cross a process boundary.
+    The words go to a file rather than back through a pipe: an hour of word-level
+    segments is megabytes, and the parent has to read the file afterwards anyway.
+    The device is worked out and reported here, not in the parent, so that the
+    parent never asks CTranslate2 about Metal, let alone opens it.
+    """
+    s = Settings(**settings)
+    # Say where it is actually running. This line used to hardcode "CPU",
+    # which was true for as long as there was no alternative and became a lie
+    # the moment there was one.
+    device, compute = _asr_device(s)
+    report(f"transcription: {s.model} in {s.language} "
+           f"({'Metal' if device == 'mps' else 'CPU'}, {compute})")
+    t = transcribe(Path(wav), s)
+    write_atomic(Path(out), json.dumps(
+        {"segments": t.segments, "language": t.language, "word_level": t.word_level},
+        ensure_ascii=False,
+    ))
 
 
 def _transcribe_apple(wav: Path, s: Settings, *, progress: bool = True) -> Transcript:

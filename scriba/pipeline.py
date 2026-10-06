@@ -13,17 +13,18 @@ import json
 import os
 import zipfile
 import re
+import signal
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
-from . import asr, audio, diarize, export, lang, naming
+from . import audio, awake, diarize, export, lang, naming, stage
 from .config import JOBS_DIR, Settings, ensure_dirs, hf_token, model_cache_problem, write_atomic
-from .jobs import RUNNING_NOTE
+from .jobs import RUNNING_NOTE, process_start, running_pid
 from .voices import VoiceRegistry
 
 Reporter = Callable[[str], None]
@@ -44,6 +45,10 @@ ERR_NO_TOKEN = "[scriba:error:hf-token]"
 # the exit code, because the readable message above it was six lines up in a log
 # it only kept the tail of.
 ERR_MARK = "[scriba:error]"
+
+# The transcription stage, as the module:function stage.call runs in a child
+# process (stage.py says why it is not run here).
+ASR_STAGE = "scriba.asr:transcribe_to_file"
 
 
 def slugify(text: str) -> str:
@@ -82,6 +87,17 @@ class JobResult:
     unresolved: list[str]
     dossier_path: Path
     duration: float
+
+
+def _diar_fingerprint_of(min_speakers: int | None, max_speakers: int | None,
+                         device: str) -> str:
+    """What decides the diarization: a function of its inputs, so they can be guessed back."""
+    # The device belongs here. config.py offers cpu as the way to check a
+    # suspected Metal problem, and without this the check reused the Metal
+    # result and proved nothing.
+    payload = {"model": diarize.DIARIZATION_MODEL,
+               "min": min_speakers, "max": max_speakers, "device": device}
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def _savez_atomic(path: Path, **arrays) -> None:
@@ -131,27 +147,123 @@ class Job:
         if self.state.get("source") != str(self.source):
             self.state["source"] = str(self.source)
             self._save_state()
+        self.s = self._with_remembered_speaker_counts(self.s)
 
     # ------------------------------------------------------------------ util
     def _save_state(self) -> None:
         write_atomic(self.state_path,
                      json.dumps(self.state, indent=2, ensure_ascii=False, default=str))
 
+    def _with_remembered_speaker_counts(self, s: Settings) -> Settings:
+        """The speaker counts an earlier run was given, when this caller gives none.
+
+        "People in the room: 2" is the one thing the app asks for before a run, and
+        it was kept only inside the diarization fingerprint, where nothing can read
+        it back. `scriba name` (the app's Save) and "Put it back in the queue" both
+        build a Job with no count, so the fingerprint no longer matched and a
+        finished recording was diarized again from scratch, minutes of work, with a
+        different number of voices possible and the typed names then applied to
+        whoever got the labels.
+
+        A caller that gives either bound is heard as it is, and the bounds are never
+        mixed with the remembered ones. The Settings is copied, not changed: one is
+        shared by every file of a batch.
+
+        A folder made before the count was stored has none to read. The fingerprint
+        still holds it, as a hash of the count with the model and the device, so the
+        counts a person could have given can be tried against it
+        (`_counts_behind_the_diarization`), and the one that matches is kept like any
+        other.
+        """
+        counts = self.state.get("speaker_counts")
+        if s.min_speakers is not None or s.max_speakers is not None:
+            return s
+        if not counts and not self.state.get("diar_fingerprint"):
+            return s
+        recorded = self.state.get("source_fingerprint")
+        if recorded is not None and recorded != self._source_fingerprint():
+            return s  # different audio at the same path: the count was about the old one
+        if not counts:
+            counts = self._counts_behind_the_diarization(s)
+            if not counts:
+                return s
+            self.state["speaker_counts"] = counts
+            self._save_state()
+        return replace(s, min_speakers=counts.get("min"), max_speakers=counts.get("max"))
+
+    def _counts_behind_the_diarization(self, s: Settings) -> dict[str, int | None] | None:
+        """The speaker count the cached diarization was made with, or None for none.
+
+        Hashes every count the app or a command line could have given, 1 to 12 for
+        each bound or neither (the app's stepper stops at 12), against the
+        fingerprint on disk. The device is tried too: it is part of the hash, and
+        somebody who switched it to cpu to check a Metal problem is the one asking
+        for the same diarization again, with the count it had. A fingerprint nothing
+        here reproduces (another model, a count of 40) is left alone, and the
+        diarization is made again as it always was.
+        """
+        stored = self.state.get("diar_fingerprint")
+        counts = (None, *range(1, 13))
+        for device in dict.fromkeys((s.diarize_device, "auto", "cpu", "mps")):
+            for low in counts:
+                for high in counts:
+                    if low is not None and high is not None and low > high:
+                        continue
+                    if _diar_fingerprint_of(low, high, device) == stored:
+                        return None if low is None and high is None else {
+                            "min": low, "max": high}
+        return None
+
     # A run in progress leaves a note in its folder saying so, with its process
     # id. Without it a job being transcribed from a terminal was listed by the
     # app as "started and produced nothing", which is the description of a
     # failure, for as long as the run lasted. The note is removed when the run
-    # ends however it ends; one left behind by a crash names a process that no
-    # longer exists, and `jobs.running_pid` treats that as no note at all.
+    # ends, by success, failure or a Stop (`_release_on_sigterm`); one left behind
+    # by a crash names a process that no longer exists, and `jobs.running_pid`
+    # treats that as no note at all.
+    #
+    # It also says when the process started. A note that outlives its run (a
+    # SIGKILL, a power cut) names a pid that macOS will give to some other process
+    # in time, and that process, alive, made every later run of the job refuse.
+    # The start time tells the two apart. None when `ps` could not say, which
+    # reads the same as a note from before this field.
     def _claim(self) -> None:
         write_atomic(self.dir / RUNNING_NOTE, json.dumps(
-            {"pid": os.getpid(), "started": datetime.now().isoformat(timespec="seconds")}))
+            {"pid": os.getpid(), "started": datetime.now().isoformat(timespec="seconds"),
+             "process_started": process_start(os.getpid())}))
 
     def _release(self) -> None:
         try:
             (self.dir / RUNNING_NOTE).unlink()
         except FileNotFoundError:
             pass
+
+    def _release_on_sigterm(self) -> Callable[[], None]:
+        """Take the note away when the app's Stop arrives; return the function that undoes it.
+
+        A Stop sends SIGTERM, and Python's answer to that is to die on the spot,
+        past the `finally` that removes the note. Every Stop left one behind. In
+        a stage the handler in stage.py runs first, stops the child, and hands the
+        signal on to this one by restoring it and sending it again.
+
+        Then the process dies as the signal would have killed it, so the app still
+        tells a Stop from a failure by how the process ended. No `failed` is
+        written: nothing failed.
+        """
+        if signal.getsignal(signal.SIGTERM) is signal.SIG_IGN:
+            return lambda: None  # somebody chose to ignore it, and so does the run
+
+        def on_term(signum: int, frame: Any) -> None:
+            self._release()
+            signal.signal(signum, previous if previous is not None else signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        try:
+            previous = signal.signal(signal.SIGTERM, on_term)
+        except ValueError:
+            return lambda: None  # not the main thread, where signals cannot be set
+        return lambda: signal.signal(signal.SIGTERM,
+                                     previous if previous is not None else signal.SIG_DFL)
 
     # ------------------------------------------------------- cache validity
     #
@@ -207,14 +319,8 @@ class Job:
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
 
     def _diar_fingerprint(self) -> str:
-        from . import diarize as _d
-        # The device belongs here. config.py offers cpu as the way to check a
-        # suspected Metal problem, and without this the check reused the Metal
-        # result and proved nothing.
-        payload = {"model": _d.DIARIZATION_MODEL,
-                   "min": self.s.min_speakers, "max": self.s.max_speakers,
-                   "device": self.s.diarize_device}
-        return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
+        return _diar_fingerprint_of(self.s.min_speakers, self.s.max_speakers,
+                                    self.s.diarize_device)
 
     def _drop_stale_cache(self) -> None:
         """If the source changed, everything derived from it is wrong. Say so, then go."""
@@ -232,7 +338,7 @@ class Job:
         for stale in ("language", "language_note", "language_confidence",
                       "language_agreement", "language_strength",
                       "language_samples", "word_level", "duration",
-                      "asr_fingerprint", "diar_fingerprint",
+                      "asr_fingerprint", "diar_fingerprint", "speaker_counts",
                       # Speaker labels are positional. Keeping the old mapping
                       # over new audio meant run() reapplied the previous
                       # conversation's names to whoever happens to be SPEAKER_00
@@ -336,21 +442,19 @@ class Job:
                         "transcribing again")
 
         s = Settings(**{**asdict(self.s), "language": self.state.get("language", self.s.language)})
-        # Say where it is actually running. This line used to hardcode "CPU",
-        # which was true for as long as there was no alternative and became a lie
-        # the moment there was one.
-        device, compute = asr._asr_device(s)
-        self.report(f"transcription: {s.model} in {s.language} "
-                    f"({'Metal' if device == 'mps' else 'CPU'}, {compute})")
-        t = asr.transcribe(self.wav, s)
-        write_atomic(path, json.dumps(
-            {"segments": t.segments, "language": t.language, "word_level": t.word_level},
-            ensure_ascii=False,
-        ))
-        self.state["word_level"] = t.word_level
+        # In a process of its own, which writes transcript.json and exits. Whisper
+        # and the aligner leave gigabytes of Metal memory that only the end of the
+        # process gives back, and diarization, next, is the stage that ran out of it
+        # on a long recording. A cached transcript never gets here, so it never
+        # starts one. The line saying where it runs is printed by the stage.
+        stage.call(ASR_STAGE,
+                   {"wav": str(self.wav), "settings": asdict(s), "out": str(path)},
+                   report=self.report, what="transcription")
+        data = json.loads(path.read_text())
+        self.state["word_level"] = data.get("word_level", False)
         self.state["asr_fingerprint"] = want
         self._save_state()
-        return t.segments
+        return data["segments"]
 
     def diarize(self, *, force: bool = False) -> diarize.Diarization:
         turns_path = self.dir / "diarization.json"
@@ -437,13 +541,34 @@ class Job:
         return matches
 
     # ------------------------------------------------------------------- run
+    def _refuse_if_running(self) -> None:
+        """Say no to a second run of a job another process is working on.
+
+        Two runs wrote the same folder (the audio copy, transcript.json, state.json)
+        and held the GPU at the same time, and nothing told the person. The second
+        took over the first one's note and whichever ended first deleted it, so the
+        other was listed as not running while it still was. A note left by a
+        process that is gone does not count (`running_pid`). Called before
+        anything is written, because the note and the state in this folder belong
+        to the run that is going on.
+        """
+        other = running_pid(self.dir)
+        if other and other != os.getpid():
+            raise RuntimeError("This recording is already being transcribed by "
+                               f"another scriba (process {other}).")
+
     def run(self, *, force: str | None = None) -> JobResult:
+        self._refuse_if_running()
         # Before the audio is even converted. Converting takes seconds and the
         # model load that follows is where a missing disk shows up, worded by
         # whichever library got there first.
         if problem := model_cache_problem():
             raise RuntimeError(problem)
         self._claim()
+        restore = self._release_on_sigterm()
+        # From here the machine is working for this recording, whoever started it.
+        # After the refusals above, so a run that was turned away holds nothing.
+        awake.hold()
         try:
             result = self._run(force=force)
         except Exception as exc:
@@ -456,6 +581,7 @@ class Job:
             raise
         finally:
             self._release()
+            restore()
         self.state.pop("failed", None)
         self._save_state()
         return result
@@ -463,6 +589,9 @@ class Job:
     def _run(self, *, force: str | None) -> JobResult:
         f_all = force == "all"
         self._drop_stale_cache()
+        if self.s.min_speakers is not None or self.s.max_speakers is not None:
+            self.state["speaker_counts"] = {"min": self.s.min_speakers,
+                                            "max": self.s.max_speakers}
         self.prepare_audio(force=f_all)
         self.detect_language(force=f_all or force == "lang")
         segments = self.transcribe(force=f_all or force == "asr")
@@ -528,7 +657,9 @@ class Job:
         self.state["matches"] = matches
         self._save_state()
 
-        unresolved = [export.display(p.label, names) for p in profiles
+        # Rendered in the language of the documents, because this list is printed into
+        # them: "Voce 2" in the header over "Voce 2" in the transcript, not "Voice 2".
+        unresolved = [export.display(p.label, names, language) for p in profiles
                       if p.label not in names]
 
         recorded = None
@@ -570,7 +701,7 @@ class Job:
             duration=self.state.get("duration", 0.0),
         )
 
-    def rewrite(self) -> JobResult:
+    def rewrite(self, *, speech: dict[str, float] | None = None) -> JobResult:
         """Write the documents again from the cache, transcribing nothing.
 
         Needed whenever the shape of a document changes, or a format is added, or
@@ -578,6 +709,10 @@ class Job:
         to run the whole pipeline, and a change to any setting the ASR cache keys
         on turns that into an hour of transcription for a file the engine already
         has the words for.
+
+        `speech` is the seconds each voice spoke, when the caller has the
+        diarizer's own count. Without it the turns are summed, which also counts
+        the pauses inside them.
         """
         turns_path = self.dir / "turns.json"
         transcript = self.dir / "transcript.json"
@@ -590,12 +725,28 @@ class Job:
         segments = json.loads(transcript.read_text()).get("segments", [])
         matches = self.state.get("matches") or {}
 
-        speech: dict[str, float] = {}
-        for t in turns:
-            if t.get("speaker"):
-                speech[t["speaker"]] = speech.get(t["speaker"], 0.0) + (t["end"] - t["start"])
+        if speech is None:
+            speech = {}
+            for t in turns:
+                if t.get("speaker"):
+                    speech[t["speaker"]] = speech.get(t["speaker"], 0.0) + (t["end"] - t["start"])
 
         return self.write_outputs(turns, segments, matches, speech=speech)
+
+    def _cached_speech_time(self) -> dict[str, float] | None:
+        """Seconds of speech per voice as the diarizer counted them, read from disk.
+
+        The figure `run` gives the briefing and the document header. Read as it
+        is, with no check that it still matches the settings: this is for putting
+        names on a result that exists, not for deciding whether to make it again.
+        """
+        try:
+            raw = json.loads((self.dir / "diarization.json").read_text())
+            return diarize.Diarization(
+                turns=[diarize.SpeakerTurn(**t) for t in raw], embeddings={},
+            ).speech_time()
+        except (OSError, ValueError, TypeError):
+            return None
 
     def speaker_labels(self) -> set[str]:
         """The speaker labels this job actually produced, read from the embeddings.
@@ -621,8 +772,23 @@ class Job:
 
     # ---------------------------------------------------------------- rename
     def set_names(self, mapping: dict[str, str], *, enroll: bool = True) -> JobResult:
-        """Assign the names, then learn them for next time. That is the whole point."""
-        self.state["names"] = {**self.state.get("names", {}), **mapping}
+        """Assign the names, then learn them for next time. That is the whole point.
+
+        The documents are written again from what is cached and no stage runs. This
+        used to call `run()`, and `run()` diarized the recording again whenever the
+        speaker count it was given differed from the one the cached diarization was
+        made with, which `scriba name` never has a count for. The new diarization
+        could find another number of voices and give the labels to other people,
+        while the names just typed were applied by label to whoever held it.
+        """
+        self._refuse_if_running()
+        names = {**self.state.get("names", {}), **mapping}
+        # An empty value takes the name away. The app sends `SPEAKER_01=` for a
+        # field the person cleared, and merging that in as it was left the old
+        # name in the document with no way to remove it. A voice the registry
+        # recognises gets its name back when the documents are written, which is
+        # what recognising it means.
+        self.state["names"] = {label: name for label, name in names.items() if name}
         self._save_state()
 
         if enroll:
@@ -638,4 +804,4 @@ class Job:
                 reg.save()
                 self.report(f"voice registry: {added} voice prints enrolled. "
                             "On the next recording these names attach on their own")
-        return self.run()
+        return self.rewrite(speech=self._cached_speech_time())

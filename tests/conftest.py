@@ -33,6 +33,27 @@ def isolated_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def stages_in_process(monkeypatch):
+    """Run the model stages in the test's own process.
+
+    Transcription runs in a child process in real use (scriba/stage.py), and a
+    monkeypatched `asr.transcribe` does not follow it there: the child would load
+    the real model. The tests that exercise the child itself remove this again.
+    """
+    monkeypatch.setenv("SCRIBA_IN_PROCESS", "1")
+
+
+@pytest.fixture(autouse=True)
+def mac_left_alone(monkeypatch):
+    """No test starts a caffeinate, or leaves one holding the machine awake.
+
+    A run keeps the Mac from sleeping (scriba/awake.py), and a Job.run in a test is a
+    run. The tests of that decision pass every input themselves.
+    """
+    monkeypatch.setenv("SCRIBA_KEEP_AWAKE", "0")
+
+
+@pytest.fixture(autouse=True)
 def real_home_untouched():
     """Fail a test that modified the real ~/.scriba, rather than let it pass."""
     def snapshot() -> set[tuple[str, int]]:

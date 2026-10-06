@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,12 +45,43 @@ class JobRow:
     failed: str = ""
 
 
+def process_start(pid: int) -> str | None:
+    """When a process started, as one stable string, or None when that cannot be read.
+
+    Asks `ps`, in UTC and the C locale so that the same process gives the same
+    text whatever the time zone or language the Mac is in when it is asked: a
+    laptop that changes zone while a watcher runs must not look like a new
+    process. Whole seconds is plenty, since two processes cannot hold one pid
+    within the same second.
+
+    None means "could not tell", not "not running": `ps` missing, slow, or a
+    process that ended between the check and the question. The caller treats it
+    as no information.
+    """
+    try:
+        done = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)], capture_output=True,
+            text=True, timeout=5, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    started = " ".join(done.stdout.split())
+    return started if done.returncode == 0 and started else None
+
+
 def running_pid(job_dir: Path) -> int | None:
     """The process transcribing this job right now, or None.
 
     Reads the note `Job._claim` leaves. A note whose process is gone is a crash's
     leftover and counts as nothing: the folder's files then say what state the
     job is really in.
+
+    A note can outlive its process for a long time. A Stop used to kill the engine
+    before it could remove the note, and macOS hands a pid to the next process
+    that asks: that stranger, alive, then refused every run of the job for as
+    long as it lived. So the note carries the moment its process started, and a
+    pid that started at another moment is somebody else's. A note written before
+    that has no moment, and a moment that cannot be read now is no reason to say
+    the run is over: both fall back to the pid alone.
     """
     try:
         note = json.loads((job_dir / RUNNING_NOTE).read_text())
@@ -62,6 +94,11 @@ def running_pid(job_dir: Path) -> int | None:
         return None
     except PermissionError:
         pass  # alive, owned by somebody else
+    started = note.get("process_started")
+    if isinstance(started, str) and started:
+        now = process_start(pid)
+        if now is not None and now != started:
+            return None
     return pid
 
 
