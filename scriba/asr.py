@@ -7,11 +7,13 @@ here. Every deviation is commented, so it can be checked instead of taken on fai
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .config import Settings, write_atomic
 
@@ -37,6 +39,38 @@ class Transcript:
     segments: list[dict[str, Any]]
     language: str
     word_level: bool
+
+
+@contextlib.contextmanager
+def _quiet_ctranslate2(device: str) -> Iterator[None]:
+    """Keep ctranslate2's warnings out of the output while a model loads on Metal.
+
+    The Metal build warns on every model load that the backend is experimental.
+    Here it is only ever installed because somebody built it on purpose (README,
+    "Metal, if you build for it"), and the app shows the engine's last line under
+    its progress bar: the warning sat there for the whole transcription, reading
+    like a fault. It also takes the note that a requested int8 resolved to
+    float16, which scriba never asks for on Metal.
+
+    The level is read only on Metal, never made louder than it was, and put back
+    whichever way the load ends. CT2_VERBOSE=-3 switches logging off with a level that
+    has no Python equivalent: reading it raises, and there is nothing to quiet.
+    """
+    if device != "mps":
+        yield
+        return
+    import ctranslate2
+
+    try:
+        previous = ctranslate2.get_log_level()
+    except KeyError:
+        yield
+        return
+    ctranslate2.set_log_level(max(previous, logging.ERROR))
+    try:
+        yield
+    finally:
+        ctranslate2.set_log_level(previous)
 
 
 def mps_available() -> tuple[bool, str]:
@@ -185,15 +219,16 @@ def transcribe(
     if device == "mps":
         print(f"[scriba] transcription: {s.model} on Metal ({compute_type})")
 
-    model = whisperx.load_model(
-        s.model,
-        device=device,
-        compute_type=compute_type,
-        language=language,
-        asr_options=build_asr_options(s),
-        vad_options={"vad_onset": s.vad_onset, "vad_offset": s.vad_offset},
-        threads=threads,
-    )
+    with _quiet_ctranslate2(device):
+        model = whisperx.load_model(
+            s.model,
+            device=device,
+            compute_type=compute_type,
+            language=language,
+            asr_options=build_asr_options(s),
+            vad_options={"vad_onset": s.vad_onset, "vad_offset": s.vad_offset},
+            threads=threads,
+        )
 
     audio = whisperx.load_audio(str(wav))
     result = model.transcribe(audio, batch_size=s.batch_size, print_progress=progress)

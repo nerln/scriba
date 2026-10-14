@@ -141,3 +141,70 @@ def test_the_cache_notices_the_device_changing(tmp_path, monkeypatch):
     on_cpu = job._asr_fingerprint()
     job.s = Settings(asr_device="mps")
     assert job._asr_fingerprint() != on_cpu
+
+
+class FakeLogLevels:
+    """Stands in for ctranslate2's log level, recording every change."""
+
+    def __init__(self, level: int | None):
+        # None is what CT2_VERBOSE=-3 looks like from Python: no level to read.
+        self.level = level
+        self.changes: list[int] = []
+
+    def get_log_level(self) -> int:
+        if self.level is None:
+            raise KeyError("LogLevel.Off")
+        return self.level
+
+    def set_log_level(self, level: int) -> None:
+        self.changes.append(level)
+        self.level = level
+
+
+@pytest.fixture
+def levels(monkeypatch):
+    def install(level):
+        module = FakeLogLevels(level)
+        monkeypatch.setitem(sys.modules, "ctranslate2", module)
+        return module
+    return install
+
+
+def test_the_metal_load_is_quiet_and_the_level_comes_back(levels):
+    # The Metal build warns on every model load that it is experimental, and the
+    # app showed that line under its progress bar for the whole transcription.
+    ct2 = levels(30)
+    with asr._quiet_ctranslate2("mps"):
+        assert ct2.level == 40
+    assert ct2.level == 30
+
+
+def test_the_level_comes_back_when_the_load_fails(levels):
+    ct2 = levels(30)
+    with pytest.raises(RuntimeError):
+        with asr._quiet_ctranslate2("mps"):
+            raise RuntimeError("model not found")
+    assert ct2.level == 30
+
+
+def test_the_cpu_load_does_not_touch_the_level(levels):
+    ct2 = levels(30)
+    with asr._quiet_ctranslate2("cpu"):
+        pass
+    assert ct2.changes == []
+
+
+def test_a_level_already_quieter_is_not_made_louder(levels):
+    ct2 = levels(50)
+    with asr._quiet_ctranslate2("mps"):
+        assert ct2.level == 50
+    assert ct2.level == 50
+
+
+def test_logging_switched_off_is_left_alone(levels):
+    # CT2_VERBOSE=-3 has no Python level, so reading it raises. That used to
+    # break the load on every device, not only on Metal.
+    ct2 = levels(None)
+    with asr._quiet_ctranslate2("mps"):
+        pass
+    assert ct2.changes == []

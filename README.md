@@ -497,6 +497,8 @@ same settings, warm model cache:
 | Forced alignment, word level | 13.3s | 14.1s |
 | Diarization, pyannote 3.1 on CPU | 372.3s | 211.0s |
 | Diarization, community-1 on CPU | | 225.9s |
+| Diarization, community-1 on Metal | | **35.7s** |
+| **Total, best of each** | **16m 37s** | **8m 50s** |
 
 ### Metal, if you build for it
 
@@ -532,8 +534,32 @@ CMake 4 because a vendored dependency declares an ancient minimum. Both were mis
 from the branch's own instructions when this was written; they are in its
 documentation now, after they cost an hour here and got reported.
 
-Re-measured again at head dcf9306f on 7 September 2026, which is the build
-installed here now. That head makes a request for `int8` on Metal resolve to
+Rebuilt on 14 October 2026, and that is the build installed here now: the pull
+request as it stood on 27 September (c9600d57), merged with master as it stood on
+12 October (51526bf), plus three fixes found while doing it (branch
+`apple-mps-backend-update` on nerln/CTranslate2, head 35d1ecd5).
+
+- A test from master caught Metal's TopK returning 0 in the empty slots for k=16,
+  which a beam of 8 would read as the best score.
+- Several workers on one model crashed inside Apple's matrix multiplication, which
+  shared one kernel object between threads.
+- An error reported by the GPU could end the process from an idle worker, or from a
+  model being unloaded, instead of reaching the next call as an error.
+
+scriba runs one worker and, by default, a beam of 5, so neither of the first two was on
+its path. The third matters only when the GPU reports an error, which it has not done
+here. The words and the speed are the same as before. The September protocol calls
+ctranslate2 directly, beam 5, on three 30-second windows of a public FLEURS Spanish
+sample. Six runs of each build, interleaved in one session against the 27 September
+build, give 157 words every time and medians of 21.4s and 21.0s, inside the spread of
+either.
+
+The build now warns on every model load that the backend is experimental. scriba
+quiets ctranslate2's warnings while its own model loads on Metal, because the window
+showed that line under the progress bar for the whole transcription.
+
+Re-measured again at head dcf9306f on 7 September 2026, which was the build
+installed here until 14 October. That head makes a request for `int8` on Metal resolve to
 `float16` instead of running a native INT8 path, and for scriba it changes
 nothing: Metal came out at 91s again, CPU at 246s against 227s the week before,
 which is the machine and not the library. scriba never asked for int8 on the GPU,
@@ -552,8 +578,6 @@ to float16 itself, now for a measured reason rather than an old one.
 Live text while recording does not go through any of this. It runs on Apple's own
 model on the Neural Engine, which is neither the CPU nor the GPU, and costs about
 ten megabytes.
-| Diarization, community-1 on Metal | | **35.7s** |
-| **Total, best of each** | **16m 37s** | **8m 13s** |
 
 Transcription and diarization are where the time goes, and no setting changes that: it
 is the library. The job cache exists for this reason, so you pay it once. Alignment,
