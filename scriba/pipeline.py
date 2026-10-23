@@ -629,6 +629,10 @@ class Job:
         turns = diarize.to_turns(segments)
         write_atomic(self.dir / "turns.json",
                      json.dumps(turns, ensure_ascii=False, indent=1))
+        # The words with their times and speakers, for the app's player: the one
+        # place where the speaker of each word survives the run.
+        write_atomic(self.dir / "words.json",
+                     json.dumps(diarize.word_track(segments), ensure_ascii=False))
 
         return self.write_outputs(turns, segments, matches,
                                   speech=dia.speech_time() if dia else {})

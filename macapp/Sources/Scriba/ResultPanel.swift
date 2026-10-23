@@ -21,6 +21,20 @@ struct ResultPanel: View {
     /// Why the voices cannot be played, when they cannot. The play button used to
     /// fail without a word.
     @State private var listenProblem: String?
+    @State private var readingAlong = false
+
+    /// The names the transcript should show: the ones saved, and the voices the
+    /// registry recognised for certain.
+    private var knownNames: [String: String] {
+        var out: [String: String] = [:]
+        for (label, match) in info.state.matches ?? [:] {
+            if let name = match.name, !name.isEmpty { out[label] = name }
+        }
+        for (label, name) in info.state.names ?? [:] where !name.isEmpty {
+            out[label] = name
+        }
+        return out
+    }
 
     var body: some View {
         ScrollView {
@@ -42,6 +56,11 @@ struct ResultPanel: View {
             seedDrafts()
             checkAudio()
         }
+        .sheet(isPresented: $readingAlong) {
+            ReadAlongView(jobDir: info.jobDir, audio: info.audio, source: info.source,
+                          names: knownNames)
+                .frame(minWidth: 760, idealWidth: 920, minHeight: 520, idealHeight: 720)
+        }
         .onChange(of: engine.speakers) { _, _ in seedDrafts() }
     }
 
@@ -49,8 +68,18 @@ struct ResultPanel: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(URL(fileURLWithPath: info.source).lastPathComponent)
-                .font(.title2).bold()
+            HStack(alignment: .firstTextBaseline) {
+                Text(URL(fileURLWithPath: info.source).lastPathComponent)
+                    .font(.title2).bold()
+                Spacer()
+                Button {
+                    readingAlong = true
+                } label: {
+                    Label("Play and read", systemImage: "text.word.spacing")
+                }
+                .help("Listen with the transcript: the word being heard is lit up, "
+                      + "and a click on any word plays from there")
+            }
             HStack(spacing: 14) {
                 Label(humanDuration(info.state.duration ?? 0), systemImage: "clock")
                 Label(languageLabel, systemImage: "globe")

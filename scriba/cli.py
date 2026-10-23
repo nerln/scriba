@@ -446,6 +446,79 @@ def export(
         console.print(f"{f.name}: {len(res.outputs)} files", markup=False, highlight=False)
 
 
+@app.command(hidden=True)
+def words(file: Path):
+    """Write words.json for a job transcribed before the player existed. Prints its path.
+
+    From the cached transcript and diarization: no model is loaded, it takes
+    seconds. Hidden, like `info`: it is the app's channel, not something a person
+    types.
+    """
+    from . import diarize
+    from .config import write_atomic
+    from .pipeline import Job
+
+    job = Job(file, report=lambda m: None)
+    out = job.dir / "words.json"
+    if not out.exists():
+        transcript, dia_path = job.dir / "transcript.json", job.dir / "diarization.json"
+        if not transcript.exists():
+            console.print("This recording has no transcript yet.", style="red", markup=False)
+            raise typer.Exit(1)
+        data = json.loads(transcript.read_text())
+        segments = data["segments"]
+        if dia_path.exists():
+            dia = diarize.Diarization(turns=[
+                diarize.SpeakerTurn(start=t["start"], end=t["end"], speaker=t["speaker"])
+                for t in json.loads(dia_path.read_text())])
+            segments = diarize.assign(segments, dia, word_level=data.get("word_level", False))
+        write_atomic(out, json.dumps(diarize.word_track(segments), ensure_ascii=False))
+    print(out)
+
+
+@app.command()
+def conversations(
+    file: Path = typer.Argument(..., help="A recording already transcribed with diarization"),
+    owner: str = typer.Option(None, "--owner",
+                              help="Whose recording it is, by voice label or name; "
+                                   "default: the voice with the most speech"),
+    model: str = typer.Option("qwen3:8b", "--model", help="Ollama model for the summaries"),
+    language: str = typer.Option("it", "--language",
+                                 help="Language of the summaries and the index: it, es, en"),
+    gap: float = typer.Option(60.0, "--gap",
+                              help="Seconds of silence after which a new conversation starts"),
+    keep_language: bool = typer.Option(False, "--keep-language",
+                                       help="Do not transcribe again the conversations "
+                                            "in another language"),
+    no_summary: bool = typer.Option(False, "--no-summary", help="Split only, no summaries"),
+    languages: str = typer.Option("it,es,en,fr,de,pt,ca", "--languages",
+                                  help="Languages a conversation may be transcribed again in"),
+):
+    """Split one long recording into its conversations, with who, what and what next.
+
+    For a day at a fair or an evening of introductions: one recording, many people.
+    Each conversation gets its own transcript, in its own language, a short summary
+    and the next step, and an index lists them all. Works on the cache of a finished
+    run; the summaries come from a model running on this Mac (Ollama).
+    """
+    from . import conversations as conv
+    from .pipeline import Job
+
+    job = Job(file, report=lambda m: console.print(f"  {m}", style="dim",
+                                                   markup=False, highlight=False))
+    try:
+        written = conv.run(job, owner=owner, model=model, language=language,
+                           keep_language=keep_language, summaries=not no_summary,
+                           long_gap=gap,
+                           languages=tuple(x.strip() for x in languages.split(",") if x.strip()))
+    except Exception as exc:
+        _mark_error(exc)
+        console.print(_readable(exc), style="red", markup=False, highlight=False)
+        raise typer.Exit(1)
+    console.print(f"{file.name}: {len(written) - 2} conversations, index at {written[0]}",
+                  markup=False, highlight=False)
+
+
 @app.command()
 def show(
     file: Path = typer.Argument(..., help="A recording already processed"),

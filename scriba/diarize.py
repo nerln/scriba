@@ -386,6 +386,38 @@ def assign(segments: list[dict], dia: Diarization, *, word_level: bool = True) -
     return segments
 
 
+def word_track(segments: list[dict]) -> list[list]:
+    """Every word with its time and its speaker: `[start, end, word, speaker]`.
+
+    What the app needs to light up the word being played and to jump to a word
+    that is clicked. The documents keep turns, which are too coarse for that, and
+    the transcript keeps words without the speakers `assign` gave them. A word the
+    aligner could not place (a number, a symbol) takes the moment the previous one
+    ended, so the track stays in order and the word is still there to click.
+    """
+    track: list[list] = []
+    for seg in sorted(segments, key=lambda s: float(s.get("start", 0.0))):
+        words = seg.get("words") or []
+        seg_speaker = seg.get("speaker")
+        last_end = float(seg.get("start", 0.0))
+        if not words:
+            text = (seg.get("text") or "").strip()
+            if text:
+                track.append([round(float(seg.get("start", 0.0)), 2),
+                              round(float(seg.get("end", 0.0)), 2), text, seg_speaker])
+            continue
+        for w in words:
+            text = (w.get("word") or "").strip()
+            if not text:
+                continue
+            start = float(w["start"]) if "start" in w else last_end
+            end = float(w["end"]) if "end" in w else start
+            track.append([round(start, 2), round(end, 2), text,
+                          w.get("speaker") or seg_speaker])
+            last_end = end
+    return track
+
+
 def to_turns(segments: list[dict], *, max_gap: float = 2.0) -> list[dict]:
     """Recompose the segments into actual conversation turns.
 

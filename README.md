@@ -316,6 +316,36 @@ the engine, so a run the app starts has it too, and a second assertion taken by 
 app beside it changes nothing. `SCRIBA_KEEP_AWAKE=0` turns it off, for a laptop that
 should sleep on battery and carry on when it wakes.
 
+### One recording, many conversations
+
+A day at a fair or an evening of introductions is one recording with twenty
+conversations in it, and nobody reads that the next morning to remember whom to write
+to. After a run:
+
+```bash
+scriba conversations "fair.m4a"            # summaries in Italian
+scriba conversations "fair.m4a" --language en --owner Ada
+```
+
+It writes `output/conversations/` in the job folder: an `index.md` with one line per
+conversation (time of day, length, language, who, what about, next step), one file per
+conversation with its own transcript, and `conversations.json` for anything else that
+wants to read them.
+
+The boundaries come from the voices. The owner of the recording is the voice with the
+most speech, or the one named with `--owner`; a conversation ends when the people
+talking with them change, or after a minute of silence (`--gap`). Greetings and
+goodbyes help where a noisy hall made the diarizer give two different people the same
+label. A stretch with nobody but the owner in it, or shorter than half a minute, is
+counted and not listed.
+
+Languages move between conversations, and the run transcribed the whole file in the
+one that won the vote. Each conversation is checked on its own audio, and the ones in
+another language are transcribed again in theirs (`--keep-language` skips that). The
+summaries come from a model on this Mac through Ollama (`--model`, default
+`qwen3:8b`); the address is checked to be this machine, and `--no-summary` splits
+without them.
+
 ### Finding your own voice
 
 Most of your own recordings have you in them, and that fact does two jobs at once.
@@ -418,6 +448,15 @@ the name field. If assigning a name costs less than checking it, people will ass
 without checking. Voices with very little speech are flagged as probable artefacts,
 which is usually what they are, somebody else's murmured agreement promoted to a
 person.
+
+The same goes for the text. Play and read, at the top of a finished transcript, plays
+the recording with the transcript under it, the word being heard lit up and kept in
+view. A click on a word plays from there, a drag still selects text to copy, and space
+plays and pauses. A transcript read on its own is where a misheard name or figure goes
+unchecked, and finding the moment again by ear in a waveform takes longer than the
+reading did. It reads `words.json`, the time and the speaker of every word, which runs
+write from now on; for an older run the app has `scriba words` make it from what the
+run left in its folder, without loading a model.
 
 On first run, open Settings. The app needs the Python of the environment where you
 installed `scriba`, and both fields say whether what you typed is there. The second
@@ -622,6 +661,7 @@ scriba/
   pipeline.py   the orchestrator, cached per stage
   stage.py      runs a model stage in a child process and hands back its result
   awake.py      keeps the Mac from idle sleep while a run works
+  conversations.py  one long recording split into its conversations, with summaries
   watch.py      watched folder
 macapp/         the SwiftUI app
 tools/          stylecheck.py, make-demo.py, and the writing rules this repo is held to

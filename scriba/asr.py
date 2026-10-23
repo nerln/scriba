@@ -321,6 +321,27 @@ def transcribe_to_file(wav: str, settings: dict[str, Any], out: str, *,
     ))
 
 
+def transcribe_many_to_files(items: list[dict[str, str]], settings: dict[str, Any], *,
+                             report: Callable[[str], None]) -> None:
+    """Several short recordings, each in its own language, in one stage process.
+
+    For `scriba conversations`: a fair or a dinner moves between languages from one
+    conversation to the next, and the file was transcribed in the one language that
+    won the vote. Each item is `{"wav", "language", "out", "label"}`, and each
+    gets transcript.json's shape in `out`. One process for all of them, for the
+    same reason as the main stage: the Metal memory goes back when it exits.
+    """
+    for item in items:
+        s = Settings(**{**settings, "language": item["language"]})
+        report(f"transcription: {item.get('label', Path(item['wav']).stem)} "
+               f"in {item['language']}")
+        t = transcribe(Path(item["wav"]), s, progress=False)
+        write_atomic(Path(item["out"]), json.dumps(
+            {"segments": t.segments, "language": t.language, "word_level": t.word_level},
+            ensure_ascii=False,
+        ))
+
+
 def _transcribe_apple(wav: Path, s: Settings, *, progress: bool = True) -> Transcript:
     import gc
 
