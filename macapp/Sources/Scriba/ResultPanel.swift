@@ -59,7 +59,9 @@ struct ResultPanel: View {
         .sheet(isPresented: $readingAlong) {
             ReadAlongView(jobDir: info.jobDir, audio: info.audio, source: info.source,
                           names: knownNames)
-                .frame(minWidth: 760, idealWidth: 920, minHeight: 520, idealHeight: 720)
+                // Inside the smallest window (900 by 560): a sheet larger than its
+                // window hangs over the edges of it.
+                .frame(minWidth: 640, idealWidth: 860, minHeight: 380, idealHeight: 500)
         }
         .onChange(of: engine.speakers) { _, _ in seedDrafts() }
     }

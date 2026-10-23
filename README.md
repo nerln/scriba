@@ -394,7 +394,7 @@ scriba memos --once          # does what is already there, then stops
 macOS keeps that folder closed, and the first run will say so. There are two ways
 past it and they are not equivalent.
 
-The blunt one is Full Disk Access for whatever runs scriba. In practice that is a
+The blunt one is Full Disk Access for whatever runs scriba. What runs it is a
 Python interpreter, and Full Disk Access on a Python interpreter is Full Disk
 Access for every package ever installed beside it. Not recommended.
 
