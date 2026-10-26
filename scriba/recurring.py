@@ -64,7 +64,7 @@ class Cluster:
 # exported footage alongside the memos, and the first run of this on a real folder
 # picked up 12 GB of video. Video can hold a conversation worth scanning, so it is
 # reachable, and it is not what someone means by "scan my voice memos".
-VOICE_EXTS = {".m4a", ".wav", ".mp3", ".aac", ".flac", ".aiff", ".aif", ".opus", ".ogg", ".wma"}
+VOICE_EXTS = {".m4a", ".qta", ".wav", ".mp3", ".aac", ".flac", ".aiff", ".aif", ".opus", ".ogg", ".wma"}
 
 
 def scan(

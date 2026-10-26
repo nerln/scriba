@@ -18,8 +18,9 @@ from pathlib import Path
 
 SAMPLE_RATE = 16_000
 
+# .qta is what Voice Memos saves now: a QuickTime audio file (see _voice_track).
 AUDIO_EXTS = {
-    ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff", ".aif",
+    ".wav", ".mp3", ".m4a", ".qta", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff", ".aif",
     ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm",
 }
 
@@ -192,6 +193,34 @@ def recorded_at(info: AudioInfo) -> tuple[datetime | None, str]:
         return None, ""
 
 
+def _voice_track(src: Path) -> list[str]:
+    """The `-map` that picks the stereo track of a Voice Memos `.qta`.
+
+    The file holds the recording twice: AAC in stereo, and four channels of Apple's
+    positional audio (tagged `apac`), which ffmpeg 8 cannot decode. Left to choose,
+    ffmpeg passes over a track it cannot decode and otherwise prefers the one with
+    more channels, so a build that learned to decode it would fold four ambisonic
+    channels into one. Naming the stereo track keeps the conversion as it is today.
+    """
+    probe_exe = _ffprobe()
+    if not probe_exe:
+        return []
+    out = subprocess.run(
+        [probe_exe, "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=codec_tag_string", "-of", "json", str(src)],
+        capture_output=True, text=True,
+    )
+    try:
+        streams = json.loads(out.stdout).get("streams", []) if out.returncode == 0 else []
+    except ValueError:
+        return []
+    tags = [s.get("codec_tag_string", "") for s in streams]
+    plain = [i for i, tag in enumerate(tags) if tag != "apac"]
+    if "apac" not in tags or not plain:
+        return []
+    return ["-map", f"0:a:{plain[0]}"]
+
+
 def prepare(
     src: Path,
     dest: Path,
@@ -225,6 +254,10 @@ def prepare(
     cmd = [
         _ffmpeg(), "-y", "-nostdin", "-loglevel", "error",
         "-i", str(src),
+    ]
+    if src.suffix.lower() == ".qta":
+        cmd += _voice_track(src)
+    cmd += [
         "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
     ]
     if filters:

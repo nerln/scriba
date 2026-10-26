@@ -60,7 +60,7 @@ enum Library {
 
     /// The same list the engine keeps, for the files macOS cannot type.
     static let knownExtensions: Set<String> = [
-        "m4a", "mp3", "wav", "aiff", "aif", "aac", "flac", "ogg", "opus", "wma",
+        "m4a", "qta", "mp3", "wav", "aiff", "aif", "aac", "flac", "ogg", "opus", "wma",
         "mp4", "mov", "m4v", "mkv", "avi", "webm",
     ]
 

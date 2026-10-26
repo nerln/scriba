@@ -1703,3 +1703,60 @@ def test_is_audio_rejects_the_rest(name):
 ])
 def test_is_audio_ignores_dot_files(name):
     assert audio.is_audio(Path("/somewhere") / name) is False
+
+
+# ==========================================================================
+# Voice Memos .qta: the stereo track, never the positional one
+# ==========================================================================
+
+def _fake_qta_tools(monkeypatch, tags):
+    """ffprobe answers with these track tags; ffmpeg writes its output."""
+    cmds = []
+    monkeypatch.setattr(audio, "_ffmpeg", lambda: "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setattr(audio, "_ffprobe", lambda: "/opt/homebrew/bin/ffprobe")
+
+    def fake_run(cmd, **kwargs):
+        cmds.append(cmd)
+        if cmd[0].endswith("ffprobe"):
+            streams = [{"index": i, "codec_tag_string": t} for i, t in enumerate(tags)]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"streams": streams}), "")
+        Path(cmd[-1]).write_bytes(b"RIFFdata")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(audio.subprocess, "run", fake_run)
+    return cmds
+
+
+def test_a_voice_memo_qta_is_audio():
+    assert audio.is_audio(Path("Lake trip.qta"))
+    assert audio.is_audio(Path("LAKE TRIP.QTA"))
+
+
+def test_a_qta_is_converted_from_its_stereo_track(monkeypatch, tmp_path):
+    src = tmp_path / "Lake trip.qta"
+    src.write_bytes(b"\0")
+    cmds = _fake_qta_tools(monkeypatch, ["apac", "mp4a"])
+
+    audio.prepare(src, tmp_path / "job" / "audio16k.wav")
+
+    ffmpeg = cmds[-1]
+    assert ffmpeg[ffmpeg.index("-map") + 1] == "0:a:1"
+    assert ffmpeg.index("-map") > ffmpeg.index("-i")
+
+
+def test_a_qta_with_one_track_is_left_to_ffmpeg(monkeypatch, tmp_path):
+    src = tmp_path / "Lake trip.qta"
+    src.write_bytes(b"\0")
+    cmds = _fake_qta_tools(monkeypatch, ["mp4a"])
+
+    audio.prepare(src, tmp_path / "job" / "audio16k.wav")
+    assert "-map" not in cmds[-1]
+
+
+def test_other_files_are_not_probed_for_tracks(monkeypatch, tmp_path):
+    src = tmp_path / "memo.m4a"
+    src.write_bytes(b"\0")
+    cmds = _fake_qta_tools(monkeypatch, ["apac", "mp4a"])
+
+    audio.prepare(src, tmp_path / "job" / "audio16k.wav")
+    assert len(cmds) == 1 and "-map" not in cmds[0]

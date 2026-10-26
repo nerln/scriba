@@ -391,6 +391,11 @@ scriba memos                 # waits for new recordings
 scriba memos --once          # does what is already there, then stops
 ```
 
+Voice Memos can also save a recording as `.qta`, a QuickTime file that holds the audio
+twice: in stereo, and as four channels of Apple's positional audio, which ffmpeg cannot
+decode. scriba reads the stereo track, whether the file comes from the library, the
+watched folder or the command line.
+
 macOS keeps that folder closed, and the first run will say so. There are two ways
 past it and they are not equivalent.
 
