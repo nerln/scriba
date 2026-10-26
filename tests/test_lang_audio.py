@@ -1744,13 +1744,52 @@ def test_a_qta_is_converted_from_its_stereo_track(monkeypatch, tmp_path):
     assert ffmpeg.index("-map") > ffmpeg.index("-i")
 
 
-def test_a_qta_with_one_track_is_left_to_ffmpeg(monkeypatch, tmp_path):
+def test_a_qta_with_one_track_is_read_from_it(monkeypatch, tmp_path):
     src = tmp_path / "Lake trip.qta"
     src.write_bytes(b"\0")
     cmds = _fake_qta_tools(monkeypatch, ["mp4a"])
 
     audio.prepare(src, tmp_path / "job" / "audio16k.wav")
-    assert "-map" not in cmds[-1]
+    ffmpeg = cmds[-1]
+    assert ffmpeg[ffmpeg.index("-map") + 1] == "0:a:0"
+    assert "-filter_complex" not in ffmpeg
+
+
+def test_a_layered_qta_mixes_its_layers_as_the_slider_says(monkeypatch, tmp_path):
+    src = tmp_path / "Lake trip.qta"
+    src.write_bytes(b"\0")
+    cmds = _fake_qta_tools(monkeypatch, ["mp4a", "mp4a"])
+
+    audio.prepare(src, tmp_path / "job" / "audio16k.wav", layer_mix=0.8)
+    ffmpeg = cmds[-1]
+    graph = ffmpeg[ffmpeg.index("-filter_complex") + 1]
+    assert graph.startswith("[0:a:0][0:a:1]amix=inputs=2:duration=longest:weights=0.2 0.8")
+    assert graph.endswith("loudnorm=I=-18:TP=-2:LRA=11[mixed]")
+    assert ffmpeg[ffmpeg.index("-map") + 1] == "[mixed]"
+    assert "-af" not in ffmpeg      # ffmpeg refuses both kinds of filter on one stream
+
+
+@pytest.mark.skipif(not audio.shutil.which("ffmpeg"), reason="needs ffmpeg")
+@pytest.mark.parametrize("layer_mix, heard", [(0.0, 440), (1.0, 1000)])
+def test_a_real_layered_file_gives_the_layer_asked_for(tmp_path, layer_mix, heard):
+    """Two takes in one QuickTime file, as a layered recording has them."""
+    src = tmp_path / "Lake trip.qta"
+    subprocess.run(
+        ["ffmpeg", "-y", "-nostdin", "-loglevel", "error",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+         "-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
+         "-map", "0:a", "-map", "1:a", "-c:a", "aac", "-f", "mov", str(src)],
+        check=True)
+    out = audio.prepare(src, tmp_path / "audio16k.wav", normalize=False,
+                        highpass=0, layer_mix=layer_mix)
+
+    import wave
+    with wave.open(str(out)) as w:
+        x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(float)
+        rate = w.getframerate()
+    spectrum = np.abs(np.fft.rfft(x))
+    peak = np.fft.rfftfreq(len(x), 1 / rate)[spectrum.argmax()]
+    assert abs(peak - heard) < 10
 
 
 def test_other_files_are_not_probed_for_tracks(monkeypatch, tmp_path):

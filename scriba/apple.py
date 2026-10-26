@@ -55,26 +55,31 @@ def available() -> tuple[bool, str]:
 
 
 def _build() -> Path:
-    """Compile the helper once and keep it.
+    return compile_helper(SOURCE, BINARY, "the Apple speech helper")
 
-    Built here rather than shipped as a binary: it is 150 lines of Swift, the
+
+def compile_helper(source: Path, binary: Path, what: str) -> Path:
+    """Compile a Swift helper once and keep it, rebuilt when its source is newer.
+
+    Built here rather than shipped as a binary: each is a page or two of Swift, the
     machine that runs scriba already has the compiler if it has Xcode's tools,
     and a binary in a git repository is a thing nobody can read.
     """
-    if BINARY.exists() and BINARY.stat().st_mtime >= SOURCE.stat().st_mtime:
-        return BINARY
+    if binary.exists() and (not source.exists()
+                            or binary.stat().st_mtime >= source.stat().st_mtime):
+        return binary
 
-    BINARY.parent.mkdir(parents=True, exist_ok=True)
+    binary.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
-        ["swiftc", "-O", "-parse-as-library", str(SOURCE), "-o", str(BINARY)],
+        ["swiftc", "-O", "-parse-as-library", str(source), "-o", str(binary)],
         capture_output=True, text=True,
     )
-    if proc.returncode != 0 or not BINARY.exists():
+    if proc.returncode != 0 or not binary.exists():
         raise RuntimeError(
-            "could not build the Apple speech helper.\n"
+            f"could not build {what}.\n"
             + (proc.stderr.strip() or "swiftc said nothing")
         )
-    return BINARY
+    return binary
 
 
 def supported_languages() -> list[str]:

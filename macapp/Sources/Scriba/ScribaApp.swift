@@ -170,6 +170,9 @@ struct SettingsView: View {
     @State private var python = Engine.pythonPath
     @State private var engine = Engine.enginePath
     @AppStorage("liveTextEnabled") private var liveText = false
+    @AppStorage(Engine.studioVoiceKey) private var studioVoice = false
+    @AppStorage(Engine.studioVoiceIntensityKey) private var studioVoiceIntensity = 0.5
+    @AppStorage(Engine.layerMixKey) private var layerMix = 0.5
     @State private var token = ""
     @State private var tokenState: TokenState = .unknown
 
@@ -223,6 +226,28 @@ struct SettingsView: View {
                      + "start; it cannot be changed mid-recording.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("Recordings from an iPhone") {
+                Toggle("Studio Voice on Spatial Audio recordings", isOn: $studioVoice)
+                Slider(value: $studioVoiceIntensity, in: 0...1) { Text("Intensity") }
+                    .disabled(!studioVoice)
+                Text("An iPhone that records Spatial Audio keeps the room in a track of "
+                     + "its own. Studio Voice pushes it and its echo down and keeps the "
+                     + "voices near the phone, as Voice Memos does when it plays them, "
+                     + "and the transcript is made from that. Worth it where the room "
+                     + "drowns the voices; on a clear recording it loses short replies. "
+                     + "Needs macOS 26; other recordings are read as they are.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Slider(value: $layerMix, in: 0...1) {
+                    Text("Layer Mix")
+                } minimumValueLabel: {
+                    Text("First")
+                } maximumValueLabel: {
+                    Text("Second")
+                }
+                Text("A layered recording holds two takes, the second made over the "
+                     + "first. Both are transcribed, weighed as this says.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("pyannote token") {
                 // A secure field, and the value never leaves this window: it goes
                 // to the `security` tool on its standard input, never in an
@@ -248,7 +273,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 480)
+        .frame(width: 520, height: 640)
         .onAppear { tokenState = Keychain.hasToken() ? .present : .missing }
     }
 

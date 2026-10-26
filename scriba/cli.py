@@ -48,8 +48,18 @@ class Stage(str, Enum):
 
 
 def _settings(language: str | None, model: str | None, min_s: int | None,
-              max_s: int | None, no_diarize: bool) -> Settings:
+              max_s: int | None, no_diarize: bool, audio_mix: str | None = None,
+              mix_intensity: float | None = None,
+              layer_mix: float | None = None) -> Settings:
     s = Settings.load()
+    if audio_mix:
+        s.audio_mix = audio_mix
+    if mix_intensity is not None:
+        s.audio_mix_intensity = mix_intensity
+    if layer_mix is not None:
+        s.layer_mix = layer_mix
+    if audio_mix or mix_intensity is not None or layer_mix is not None:
+        s.validate()
     if language:
         s.language = language
     if model:
@@ -77,9 +87,23 @@ def run(
     collection: str = typer.Option(None, "--collection",
                                    help="The group these recordings belong to, "
                                         "usually the folder they came from"),
+    audio_mix: str = typer.Option(None, "--audio-mix",
+                                  help="For a recording made with Spatial Audio on an "
+                                       "iPhone: off, standard, studio (Studio Voice), "
+                                       "cinematic, in-frame or voices"),
+    mix_intensity: float = typer.Option(None, "--mix-intensity",
+                                        help="Studio Voice's slider, 0 to 1"),
+    layer_mix: float = typer.Option(None, "--layer-mix",
+                                    help="A layered Voice Memos recording: 0 the first "
+                                         "layer, 1 the second, 0.5 both"),
 ):
     """Transcribe and diarize one or more files."""
-    s = _settings(language, model, min_speakers, max_speakers, no_diarize)
+    try:
+        s = _settings(language, model, min_speakers, max_speakers, no_diarize,
+                      audio_mix, mix_intensity, layer_mix)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(2)
     failures: list[tuple[Path, str]] = []
     for f in files:
         console.rule(f"[bold]{f.name}")

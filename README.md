@@ -391,10 +391,44 @@ scriba memos                 # waits for new recordings
 scriba memos --once          # does what is already there, then stops
 ```
 
-Voice Memos can also save a recording as `.qta`, a QuickTime file that holds the audio
-twice: in stereo, and as four channels of Apple's positional audio, which ffmpeg cannot
-decode. scriba reads the stereo track, whether the file comes from the library, the
-watched folder or the command line.
+### Recordings from an iPhone: `.qta`, Spatial Audio, layers
+
+Voice Memos can also save a recording as `.qta`, a QuickTime file that comes in two
+shapes. scriba reads both, from the library, a watched folder or the command line.
+
+A recording made with Spatial Audio holds the audio twice: in stereo, and as four
+channels of Apple's positional audio, with the analysis the phone made while
+recording. ffmpeg cannot decode the second, so the stereo track is what gets
+transcribed unless you ask for more. On macOS 26 or later scriba can render it the
+way Voice Memos plays it with Studio Voice: the room and its echo pushed down, the
+voices near the phone kept.
+
+```bash
+scriba run "Lake trip.qta" --audio-mix studio                      # Studio Voice
+scriba run "Lake trip.qta" --audio-mix studio --mix-intensity 0.6  # and its slider
+scriba settings --set audio_mix=studio                             # for every run
+```
+
+The other Audio Mix styles are there too: `standard`, `cinematic`, `in-frame`, and
+`voices`, which is Studio with the background left out altogether. Apple's Cinematic
+framework does the rendering, through a small Swift helper built the first time it
+is needed. On a minute of conversation, Studio at full intensity took the quietest
+tenth of the audio from -48 dB to -75 dB and left the speech within 1 dB of where it
+was.
+
+Quieter is not the same as better transcribed, and that is why it is off by default.
+On the same recording, a conversation at a table, two stretches of two minutes
+came out worse through Studio than from the stereo track: 224 words against 256 in
+the first, with short replies gone and a phrase turned into a different one, and a
+lower alignment confidence in the second (0.64 against 0.69). Studio is worth trying
+on a recording where the room drowns the voices; where the voices were clear, the
+stereo track is the better source. Changing the style of a recording already transcribed makes the next run hear
+it again from the start, since it is different audio.
+
+A layered recording holds two takes, the second made while the first played back.
+Both are transcribed, mixed as the Layer Mix slider in Voice Memos does:
+`--layer-mix 0` for the first alone, `1` for the second, `0.5`, the default, for both
+evenly. In the app, both settings are under Recordings from an iPhone.
 
 macOS keeps that folder closed, and the first run will say so. There are two ways
 past it and they are not equivalent.
@@ -667,6 +701,7 @@ scriba/
   stage.py      runs a model stage in a child process and hands back its result
   awake.py      keeps the Mac from idle sleep while a run works
   conversations.py  one long recording split into its conversations, with summaries
+  spatial.py    Apple's Audio Mix for recordings made with Spatial Audio
   watch.py      watched folder
 macapp/         the SwiftUI app
 tools/          stylecheck.py, make-demo.py, and the writing rules this repo is held to

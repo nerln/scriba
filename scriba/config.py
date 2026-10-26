@@ -122,6 +122,10 @@ def hf_token() -> str | None:
 # Settings
 # --------------------------------------------------------------------------- #
 
+# The Audio Mix styles spatial.py can render; kept here so validate() needs no
+# import of it.
+AUDIO_MIX_STYLES = ("standard", "studio", "cinematic", "in-frame", "voices")
+
 @dataclass
 class Settings:
     # ASR
@@ -184,6 +188,19 @@ class Settings:
     # transcript ever comes out with one speaker owning the whole recording, that
     # is the shape #1337 describes: set this to "cpu" and compare.
     diarize_device: str = "auto"
+
+    # Recordings from an iPhone. One made with Spatial Audio (Voice Memos .qta,
+    # Camera .mov) can be heard through Apple's Audio Mix, as Voice Memos does with
+    # Studio Voice: "studio" pushes the room and its echo down and keeps the
+    # voices near the phone. "off" reads the stereo track the phone wrote beside
+    # the spatial one, as before. The intensity is Studio Voice's slider, 0 to 1;
+    # None takes the value the phone stored. See spatial.py.
+    audio_mix: str = "off"
+    audio_mix_intensity: float | None = None
+    # A layered Voice Memos recording holds two takes, the second recorded over
+    # the first. They are mixed as the Layer Mix slider does: 0 is the first
+    # layer alone, 1 the second alone, 0.5 both evenly.
+    layer_mix: float = 0.5
 
     # Voice matching. These thresholds are not gospel, they are a starting point to
     # calibrate on YOUR recordings. The honest way to do it: annotate three or four
@@ -262,6 +279,13 @@ class Settings:
             problems.append(f"asr_device={self.asr_device!r}: expected auto, cpu or mps")
         if self.diarize_device not in ("auto", "cpu", "mps"):
             problems.append(f"diarize_device={self.diarize_device!r}: expected auto, cpu or mps")
+        if self.audio_mix not in ("off", *AUDIO_MIX_STYLES):
+            problems.append(f"audio_mix={self.audio_mix!r}: expected off or one of "
+                            f"{', '.join(AUDIO_MIX_STYLES)}")
+        for field_name in ("audio_mix_intensity", "layer_mix"):
+            v = getattr(self, field_name)
+            if v is not None and (not numeric(field_name) or not 0.0 <= float(v) <= 1.0):
+                problems.append(f"{field_name}={v!r}: a slider position, from 0 to 1")
         if self.voice_min_speech_sec < 0:
             problems.append(f"voice_min_speech_sec={self.voice_min_speech_sec}: cannot be negative")
 

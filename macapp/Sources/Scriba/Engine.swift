@@ -141,6 +141,27 @@ final class Engine: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "enginePath") }
     }
 
+    /// The iPhone settings, in UserDefaults like the paths, sent with every run.
+    static let studioVoiceKey = "studioVoice"
+    static let studioVoiceIntensityKey = "studioVoiceIntensity"
+    static let layerMixKey = "layerMix"
+
+    /// What a run is told about iPhone recordings. The engine applies each only
+    /// where it fits: Studio Voice to a file with Spatial Audio, the layer mix to a
+    /// layered one.
+    static var iPhoneArguments: [String] {
+        let d = UserDefaults.standard
+        var args: [String] = []
+        if d.bool(forKey: studioVoiceKey) {
+            let intensity = d.object(forKey: studioVoiceIntensityKey) as? Double ?? 0.5
+            args += ["--audio-mix", "studio", "--mix-intensity", String(format: "%.2f", intensity)]
+        }
+        if let layer = d.object(forKey: layerMixKey) as? Double, abs(layer - 0.5) > 0.005 {
+            args += ["--layer-mix", String(format: "%.2f", layer)]
+        }
+        return args
+    }
+
     static var isConfigured: Bool {
         FileManager.default.isExecutableFile(atPath: pythonPath)
     }
@@ -185,6 +206,7 @@ final class Engine: ObservableObject {
         // The folder a recording came from has to outlive the queue: once it is
         // a job, nothing else groups forty files all called "Recording 12".
         if !collection.isEmpty { args += ["--collection", collection] }
+        args += Self.iPhoneArguments
         launch(args, on: file, startingPhase: .preparing, onFinish: onFinish)
     }
 

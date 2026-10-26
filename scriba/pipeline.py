@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from . import audio, awake, diarize, export, lang, naming, stage
+from . import audio, awake, diarize, export, lang, naming, spatial, stage
 from .config import JOBS_DIR, Settings, ensure_dirs, hf_token, model_cache_problem, write_atomic
 from .jobs import RUNNING_NOTE, process_start, running_pid
 from .voices import VoiceRegistry
@@ -136,6 +136,7 @@ class Job:
         self.dir = JOBS_DIR / job_slug(self.source)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.wav = self.dir / "audio16k.wav"
+        self._recipe: str | None = None
         self.state_path = self.dir / "state.json"
         self.state: dict[str, Any] = (
             json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
@@ -332,8 +333,14 @@ class Job:
 
         self.report("the source file changed since this job was last run, "
                     "so the cached transcript belongs to different audio. Redoing it.")
+        self._forget_derived()
+        self.state["source_fingerprint"] = current
+        self._save_state()
+
+    def _forget_derived(self) -> None:
+        """Drop the audio and everything heard in it, keeping who the job is for."""
         for name in ("audio16k.wav", "transcript.json", "diarization.json",
-                     "embeddings.npz", "turns.json"):
+                     "embeddings.npz", "turns.json", "words.json"):
             (self.dir / name).unlink(missing_ok=True)
         for stale in ("language", "language_note", "language_confidence",
                       "language_agreement", "language_strength",
@@ -345,7 +352,47 @@ class Job:
                       # this time, and produced a finished document saying so.
                       "names", "matches"):
             self.state.pop(stale, None)
-        self.state["source_fingerprint"] = current
+
+    def _audio_recipe(self) -> str:
+        """How the audio is made from the source, as one string a cache can compare.
+
+        "plain" for what ffmpeg converts as it is; "studio@1.00" for Apple's Audio
+        Mix rendered from a Spatial Audio track; "layers@0.50" for a layered Voice
+        Memos recording mixed down. A different recipe is different audio, and
+        every word heard in it has to be heard again.
+        """
+        if self._recipe is not None:
+            return self._recipe
+        recipe = "plain"
+        suffix = self.source.suffix.lower()
+        if self.s.audio_mix != "off" and suffix in spatial.SUFFIXES:
+            found = spatial.info(self.source)
+            if found.get("spatial") and found.get("supported"):
+                intensity = self.s.audio_mix_intensity
+                if intensity is None:
+                    intensity = float(found.get("default_intensity", 0.5))
+                recipe = f"{self.s.audio_mix}@{intensity:.2f}"
+            elif found.get("spatial"):
+                self.report("audio: this Mac cannot render Audio Mix, so the stereo "
+                            "track is read as it is")
+            elif found.get("why"):
+                self.report(f"audio: Audio Mix cannot run here, {found['why']}")
+            else:
+                self.report("audio: no Spatial Audio in this recording, so there is "
+                            "no Audio Mix to render")
+        if recipe == "plain" and suffix == ".qta" and len(audio.layers(self.source)) > 1:
+            recipe = f"layers@{self.s.layer_mix:.2f}"
+        self._recipe = recipe
+        return recipe
+
+    def _drop_changed_recipe(self) -> None:
+        recorded = self.state.get("audio_recipe", "plain")
+        recipe = self._audio_recipe()
+        if recorded == recipe or not self.wav.exists():
+            return
+        self.report(f"audio: made as {recorded} last time and as {recipe} now, so the "
+                    "audio and everything heard in it is done again.")
+        self._forget_derived()
         self._save_state()
 
     def _cache(self, key: str, path: Path, produce: Callable[[], Any],
@@ -384,8 +431,22 @@ class Job:
                 self.report("audio: already prepared")
                 return self.wav
 
-        self.report("audio: converting to 16 kHz mono WAV, normalizing the level")
-        audio.prepare(self.source, self.wav)
+        recipe = self._audio_recipe()
+        if recipe.startswith(spatial.STYLES):
+            style, intensity = recipe.split("@")
+            self.report(f"audio: rendering Apple's Audio Mix ({style}, intensity "
+                        f"{intensity}) from the Spatial Audio track")
+            mixed = spatial.render(self.source, self.dir / "audio-mix.wav",
+                                   style, float(intensity))
+            try:
+                audio.prepare(mixed, self.wav)
+            finally:
+                mixed.unlink(missing_ok=True)
+        else:
+            self.report("audio: converting to 16 kHz mono WAV, normalizing the level"
+                        + (", both layers mixed" if recipe.startswith("layers") else ""))
+            audio.prepare(self.source, self.wav, layer_mix=self.s.layer_mix)
+        self.state["audio_recipe"] = recipe
 
         when, when_source = audio.recorded_at(info)
         self.state["duration"] = info.duration
@@ -589,6 +650,7 @@ class Job:
     def _run(self, *, force: str | None) -> JobResult:
         f_all = force == "all"
         self._drop_stale_cache()
+        self._drop_changed_recipe()
         if self.s.min_speakers is not None or self.s.max_speakers is not None:
             self.state["speaker_counts"] = {"min": self.s.min_speakers,
                                             "max": self.s.max_speakers}

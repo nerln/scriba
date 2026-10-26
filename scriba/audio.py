@@ -18,7 +18,7 @@ from pathlib import Path
 
 SAMPLE_RATE = 16_000
 
-# .qta is what Voice Memos saves now: a QuickTime audio file (see _voice_track).
+# .qta is what Voice Memos saves now: a QuickTime audio file (see layers).
 AUDIO_EXTS = {
     ".wav", ".mp3", ".m4a", ".qta", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff", ".aif",
     ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm",
@@ -193,14 +193,17 @@ def recorded_at(info: AudioInfo) -> tuple[datetime | None, str]:
         return None, ""
 
 
-def _voice_track(src: Path) -> list[str]:
-    """The `-map` that picks the stereo track of a Voice Memos `.qta`.
+def layers(src: Path) -> list[int]:
+    """The audio tracks of a Voice Memos `.qta` worth hearing, by audio index.
 
-    The file holds the recording twice: AAC in stereo, and four channels of Apple's
-    positional audio (tagged `apac`), which ffmpeg 8 cannot decode. Left to choose,
-    ffmpeg passes over a track it cannot decode and otherwise prefers the one with
-    more channels, so a build that learned to decode it would fold four ambisonic
-    channels into one. Naming the stereo track keeps the conversion as it is today.
+    A `.qta` comes in two shapes. One made with Spatial Audio holds the recording
+    twice: AAC in stereo, and four channels of Apple's positional audio (tagged
+    `apac`), which ffmpeg 8 cannot decode and spatial.py renders instead. Left to
+    choose, ffmpeg passes over a track it cannot decode and otherwise prefers the
+    one with more channels, so a build that learned to decode it would fold four
+    ambisonic channels into one; the positional track is never on this list. A
+    layered recording holds two takes, the second made while the first played,
+    and both belong in the transcript. An empty list leaves the choice to ffmpeg.
     """
     probe_exe = _ffprobe()
     if not probe_exe:
@@ -214,11 +217,7 @@ def _voice_track(src: Path) -> list[str]:
         streams = json.loads(out.stdout).get("streams", []) if out.returncode == 0 else []
     except ValueError:
         return []
-    tags = [s.get("codec_tag_string", "") for s in streams]
-    plain = [i for i, tag in enumerate(tags) if tag != "apac"]
-    if "apac" not in tags or not plain:
-        return []
-    return ["-map", f"0:a:{plain[0]}"]
+    return [i for i, s in enumerate(streams) if s.get("codec_tag_string") != "apac"]
 
 
 def prepare(
@@ -227,6 +226,7 @@ def prepare(
     *,
     normalize: bool = True,
     highpass: int = 60,
+    layer_mix: float = 0.5,
 ) -> Path:
     """Convert to 16 kHz mono PCM WAV.
 
@@ -255,13 +255,24 @@ def prepare(
         _ffmpeg(), "-y", "-nostdin", "-loglevel", "error",
         "-i", str(src),
     ]
-    if src.suffix.lower() == ".qta":
-        cmd += _voice_track(src)
-    cmd += [
-        "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
-    ]
-    if filters:
-        cmd += ["-af", ",".join(filters)]
+    tracks = layers(src) if src.suffix.lower() == ".qta" else []
+    if len(tracks) > 1:
+        # A layered recording, mixed as Voice Memos' Layer Mix slider does: 0 the
+        # first layer alone, 1 the second. A third layer, if one ever comes, gets
+        # the second's weight.
+        weights = [1 - layer_mix] + [layer_mix] * (len(tracks) - 1)
+        graph = "".join(f"[0:a:{i}]" for i in tracks)
+        graph += (f"amix=inputs={len(tracks)}:duration=longest:"
+                  f"weights={' '.join(f'{w:g}' for w in weights)}")
+        graph += "".join("," + f for f in filters) + "[mixed]"
+        cmd += ["-filter_complex", graph, "-map", "[mixed]",
+                "-ac", "1", "-ar", str(SAMPLE_RATE)]
+    else:
+        if tracks:
+            cmd += ["-map", f"0:a:{tracks[0]}"]
+        cmd += ["-vn", "-ac", "1", "-ar", str(SAMPLE_RATE)]
+        if filters:
+            cmd += ["-af", ",".join(filters)]
     # State the container. ffmpeg picks the output format from the file extension, and
     # the scratch file ends in .part, which means nothing to it.
     cmd += ["-c:a", "pcm_s16le", "-f", "wav", str(partial)]
